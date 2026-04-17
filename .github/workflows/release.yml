@@ -96,10 +96,34 @@ jobs:
           name: openwrt-release
           path: dist/openwrt
 
+      - name: Prepare release asset names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/publish
+
+          cp -f dist/core/* dist/publish/
+
+          if [[ -f dist/publish/checksums.txt ]]; then
+            mv -f dist/publish/checksums.txt dist/publish/core_checksums.txt
+          fi
+          if [[ -f dist/publish/release_manifest.json ]]; then
+            mv -f dist/publish/release_manifest.json dist/publish/core_release_manifest.json
+          fi
+
+          cp -f dist/openwrt/* dist/publish/
+          rm -f dist/publish/checksums.txt dist/publish/release_manifest.json
+
+          if [[ -f dist/openwrt/checksums.txt ]]; then
+            cp -f dist/openwrt/checksums.txt dist/publish/openwrt_checksums.txt
+          fi
+          if [[ -f dist/openwrt/release_manifest.json ]]; then
+            cp -f dist/openwrt/release_manifest.json dist/publish/openwrt_release_manifest.json
+          fi
+
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/core/*
-            dist/openwrt/*
+            dist/publish/*
           generate_release_notes: true
