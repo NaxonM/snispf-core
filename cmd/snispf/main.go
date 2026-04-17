@@ -104,6 +104,25 @@ func main() {
 		// Internal compatibility flag used by service mode process spawning.
 	}
 
+	if *showInfo {
+		fmt.Print(banner)
+		caps := utils.CheckPlatformCapabilities(rawinjector.IsRawAvailable())
+		fmt.Printf("platform=%s\n", caps.Platform)
+		fmt.Printf("fragment_support=%v\n", caps.Fragment)
+		fmt.Printf("tls_record_frag=%v\n", caps.TLSRecordFrag)
+		fmt.Printf("fake_sni=%v\n", caps.FakeSNI)
+		fmt.Printf("tcp_nodelay=%v\n", caps.TCPNoDelay)
+		fmt.Printf("raw_socket=%v\n", caps.RawSocket)
+		fmt.Printf("ip_ttl_trick=%v\n", caps.IPTTLTrick)
+		fmt.Printf("af_packet=%v\n", caps.AFPacket)
+		fmt.Printf("raw_injection=%v\n", caps.RawInjection)
+		if diag := strings.TrimSpace(rawinjector.RawDiagnostic()); diag != "" {
+			fmt.Printf("raw_injection_diagnostic=%s\n", diag)
+		}
+		printPrivilegeGuidance(caps)
+		return
+	}
+
 	cfgPath := firstNonEmpty(*configPath, *configPathShort)
 	if cfgPath == "" {
 		cfgPath = "config.json"
@@ -191,25 +210,6 @@ func main() {
 	if cfg.BypassMethod != "fragment" && cfg.BypassMethod != "fake_sni" && cfg.BypassMethod != "combined" && cfg.BypassMethod != "wrong_seq" {
 		logx.Warnf("unknown bypass method %q, using fragment", cfg.BypassMethod)
 		cfg.BypassMethod = "fragment"
-	}
-
-	if *showInfo {
-		fmt.Print(banner)
-		caps := utils.CheckPlatformCapabilities(rawinjector.IsRawAvailable())
-		fmt.Printf("platform=%s\n", caps.Platform)
-		fmt.Printf("fragment_support=%v\n", caps.Fragment)
-		fmt.Printf("tls_record_frag=%v\n", caps.TLSRecordFrag)
-		fmt.Printf("fake_sni=%v\n", caps.FakeSNI)
-		fmt.Printf("tcp_nodelay=%v\n", caps.TCPNoDelay)
-		fmt.Printf("raw_socket=%v\n", caps.RawSocket)
-		fmt.Printf("ip_ttl_trick=%v\n", caps.IPTTLTrick)
-		fmt.Printf("af_packet=%v\n", caps.AFPacket)
-		fmt.Printf("raw_injection=%v\n", caps.RawInjection)
-		if diag := strings.TrimSpace(rawinjector.RawDiagnostic()); diag != "" {
-			fmt.Printf("raw_injection_diagnostic=%s\n", diag)
-		}
-		printPrivilegeGuidance(caps)
-		return
 	}
 
 	if err := validateSNIGuardrails(cfg); err != nil {
