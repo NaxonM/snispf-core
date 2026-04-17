@@ -231,7 +231,9 @@ Verification scripts:
 
 Release outputs:
 
-- Core: `release/`, `release/checksums.txt`, `release/release_manifest.json`
+- Core binaries: `release/snispf_windows_amd64.exe`, `release/snispf_linux_amd64`, `release/snispf_linux_arm64`
+- Bundled archives: `release/snispf_windows_amd64_bundle.zip`, `release/snispf_linux_amd64_bundle.tar.gz`, `release/snispf_linux_arm64_bundle.tar.gz`
+- Metadata: `release/checksums.txt`, `release/release_manifest.json`
 - OpenWrt: `release/openwrt/`, `release/openwrt/checksums.txt`, `release/openwrt/release_manifest.json`
 
 ## GitHub Actions Release

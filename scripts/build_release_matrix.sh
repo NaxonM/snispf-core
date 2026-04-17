@@ -9,6 +9,10 @@ cd "${REPO_ROOT}"
 RELEASE_DIR="${REPO_ROOT}/release"
 mkdir -p "${RELEASE_DIR}"
 
+WINDOWS_BUNDLE_DIR="${RELEASE_DIR}/snispf_windows_amd64_bundle"
+LINUX_AMD64_BUNDLE_DIR="${RELEASE_DIR}/snispf_linux_amd64_bundle"
+LINUX_ARM64_BUNDLE_DIR="${RELEASE_DIR}/snispf_linux_arm64_bundle"
+
 echo "Running tests..."
 go test ./...
 
@@ -49,6 +53,83 @@ if [[ ! -f "${RELEASE_DIR}/WinDivert.dll" || ! -f "${RELEASE_DIR}/WinDivert64.sy
 	echo "Warning: WinDivert runtime files not fully found. Windows wrong_seq runtime requires WinDivert.dll and WinDivert64.sys beside the exe." >&2
 fi
 
+echo "Packaging release bundles..."
+rm -rf "${WINDOWS_BUNDLE_DIR}" "${LINUX_AMD64_BUNDLE_DIR}" "${LINUX_ARM64_BUNDLE_DIR}"
+
+create_bundle_layout() {
+	local bundle_dir="$1"
+	mkdir -p "${bundle_dir}/configs/examples"
+
+	if [[ -f "${REPO_ROOT}/config.json" ]]; then
+		cp -f "${REPO_ROOT}/config.json" "${bundle_dir}/config.json"
+	elif [[ -f "${REPO_ROOT}/configs/examples/fragment-baseline.json" ]]; then
+		cp -f "${REPO_ROOT}/configs/examples/fragment-baseline.json" "${bundle_dir}/config.json"
+	fi
+
+	if [[ -d "${REPO_ROOT}/configs/examples" ]]; then
+		cp -f "${REPO_ROOT}/configs/examples/"*.json "${bundle_dir}/configs/examples/" 2>/dev/null || true
+	fi
+
+	cat > "${bundle_dir}/README_BUNDLE.txt" <<'EOF'
+SNISPF bundled release
+
+Contents:
+- Core binary for this platform
+- config.json starter template
+- configs/examples with additional profiles
+
+Quick start:
+1) Edit config.json for your upstream endpoint and SNI.
+2) Run the binary with --config ./config.json.
+3) On Windows strict wrong_seq mode requires WinDivert.dll and WinDivert64.sys next to the exe.
+EOF
+}
+
+create_bundle_layout "${WINDOWS_BUNDLE_DIR}"
+create_bundle_layout "${LINUX_AMD64_BUNDLE_DIR}"
+create_bundle_layout "${LINUX_ARM64_BUNDLE_DIR}"
+
+cp -f "${RELEASE_DIR}/snispf_windows_amd64.exe" "${WINDOWS_BUNDLE_DIR}/snispf_windows_amd64.exe"
+cp -f "${RELEASE_DIR}/snispf_linux_amd64" "${LINUX_AMD64_BUNDLE_DIR}/snispf_linux_amd64"
+cp -f "${RELEASE_DIR}/snispf_linux_arm64" "${LINUX_ARM64_BUNDLE_DIR}/snispf_linux_arm64"
+
+if [[ -f "${RELEASE_DIR}/WinDivert.dll" ]]; then
+	cp -f "${RELEASE_DIR}/WinDivert.dll" "${WINDOWS_BUNDLE_DIR}/WinDivert.dll"
+fi
+if [[ -f "${RELEASE_DIR}/WinDivert64.sys" ]]; then
+	cp -f "${RELEASE_DIR}/WinDivert64.sys" "${WINDOWS_BUNDLE_DIR}/WinDivert64.sys"
+fi
+
+pushd "${RELEASE_DIR}" >/dev/null
+if command -v zip >/dev/null 2>&1; then
+	rm -f snispf_windows_amd64_bundle.zip
+	zip -rq snispf_windows_amd64_bundle.zip "$(basename "${WINDOWS_BUNDLE_DIR}")"
+elif command -v python3 >/dev/null 2>&1; then
+	python3 - <<'PY'
+import pathlib
+import zipfile
+
+release = pathlib.Path('.')
+bundle = release / 'snispf_windows_amd64_bundle'
+archive = release / 'snispf_windows_amd64_bundle.zip'
+if archive.exists():
+    archive.unlink()
+with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+    for p in bundle.rglob('*'):
+        if p.is_file():
+            zf.write(p, p.relative_to(release))
+PY
+else
+	echo "Neither zip nor python3 is available to create Windows bundle archive" >&2
+	exit 1
+fi
+
+tar -czf snispf_linux_amd64_bundle.tar.gz "$(basename "${LINUX_AMD64_BUNDLE_DIR}")"
+tar -czf snispf_linux_arm64_bundle.tar.gz "$(basename "${LINUX_ARM64_BUNDLE_DIR}")"
+popd >/dev/null
+
+rm -rf "${WINDOWS_BUNDLE_DIR}" "${LINUX_AMD64_BUNDLE_DIR}" "${LINUX_ARM64_BUNDLE_DIR}"
+
 echo "Generating checksums..."
 SHA_TOOL=""
 if command -v sha256sum >/dev/null 2>&1; then
@@ -67,6 +148,9 @@ ARTIFACTS=(
 	"snispf_windows_amd64.exe"
 	"snispf_linux_amd64"
 	"snispf_linux_arm64"
+	"snispf_windows_amd64_bundle.zip"
+	"snispf_linux_amd64_bundle.tar.gz"
+	"snispf_linux_arm64_bundle.tar.gz"
 )
 
 if [[ -f "${RELEASE_DIR}/WinDivert.dll" ]]; then

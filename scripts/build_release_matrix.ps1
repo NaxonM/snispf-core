@@ -6,6 +6,10 @@ Set-Location $repo
 $releaseDir = Join-Path $repo "release"
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 
+$windowsBundleDir = Join-Path $releaseDir "snispf_windows_amd64_bundle"
+$linuxAmd64BundleDir = Join-Path $releaseDir "snispf_linux_amd64_bundle"
+$linuxArm64BundleDir = Join-Path $releaseDir "snispf_linux_arm64_bundle"
+
 Write-Host "Running tests..."
 go test ./...
 
@@ -74,10 +78,94 @@ if (-not $copiedWinDivert.ContainsKey("WinDivert.dll") -or -not $copiedWinDivert
     Write-Warning "WinDivert.dll / WinDivert64.sys were not found in expected locations. Windows wrong_seq runtime will require them beside the .exe."
 }
 
+Write-Host "Packaging release bundles..."
+Remove-Item -Path $windowsBundleDir, $linuxAmd64BundleDir, $linuxArm64BundleDir -Recurse -Force -ErrorAction SilentlyContinue
+
+function Initialize-BundleLayout {
+    param(
+        [Parameter(Mandatory = $true)][string]$BundleDir
+    )
+
+    New-Item -ItemType Directory -Path $BundleDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $BundleDir "configs\examples") -Force | Out-Null
+
+    $defaultConfig = Join-Path $repo "config.json"
+    if (Test-Path $defaultConfig) {
+        Copy-Item -Path $defaultConfig -Destination (Join-Path $BundleDir "config.json") -Force
+    }
+    else {
+        $fallbackConfig = Join-Path $repo "configs\examples\fragment-baseline.json"
+        if (Test-Path $fallbackConfig) {
+            Copy-Item -Path $fallbackConfig -Destination (Join-Path $BundleDir "config.json") -Force
+        }
+    }
+
+    $examplesDir = Join-Path $repo "configs\examples"
+    if (Test-Path $examplesDir) {
+        Get-ChildItem -Path $examplesDir -File -Filter *.json -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $BundleDir "configs\examples\$($_.Name)") -Force
+            }
+    }
+
+    @"
+SNISPF bundled release
+
+Contents:
+- Core binary for this platform
+- config.json starter template
+- configs/examples with additional profiles
+
+Quick start:
+1) Edit config.json for your upstream endpoint and SNI.
+2) Run the binary with --config ./config.json.
+3) On Windows strict wrong_seq mode requires WinDivert.dll and WinDivert64.sys next to the exe.
+"@ | Set-Content -Path (Join-Path $BundleDir "README_BUNDLE.txt") -Encoding ascii
+}
+
+Initialize-BundleLayout -BundleDir $windowsBundleDir
+Initialize-BundleLayout -BundleDir $linuxAmd64BundleDir
+Initialize-BundleLayout -BundleDir $linuxArm64BundleDir
+
+Copy-Item -Path (Join-Path $releaseDir "snispf_windows_amd64.exe") -Destination (Join-Path $windowsBundleDir "snispf_windows_amd64.exe") -Force
+Copy-Item -Path (Join-Path $releaseDir "snispf_linux_amd64") -Destination (Join-Path $linuxAmd64BundleDir "snispf_linux_amd64") -Force
+Copy-Item -Path (Join-Path $releaseDir "snispf_linux_arm64") -Destination (Join-Path $linuxArm64BundleDir "snispf_linux_arm64") -Force
+
+if (Test-Path (Join-Path $releaseDir "WinDivert.dll")) {
+    Copy-Item -Path (Join-Path $releaseDir "WinDivert.dll") -Destination (Join-Path $windowsBundleDir "WinDivert.dll") -Force
+}
+if (Test-Path (Join-Path $releaseDir "WinDivert64.sys")) {
+    Copy-Item -Path (Join-Path $releaseDir "WinDivert64.sys") -Destination (Join-Path $windowsBundleDir "WinDivert64.sys") -Force
+}
+
+$windowsBundleZip = Join-Path $releaseDir "snispf_windows_amd64_bundle.zip"
+if (Test-Path $windowsBundleZip) {
+    Remove-Item -Path $windowsBundleZip -Force
+}
+Compress-Archive -Path $windowsBundleDir -DestinationPath $windowsBundleZip -Force
+
+$tarCmd = Get-Command tar -ErrorAction SilentlyContinue
+if ($null -eq $tarCmd) {
+    throw "tar is required to package Linux tar.gz bundles"
+}
+
+$linuxAmd64Tar = Join-Path $releaseDir "snispf_linux_amd64_bundle.tar.gz"
+$linuxArm64Tar = Join-Path $releaseDir "snispf_linux_arm64_bundle.tar.gz"
+if (Test-Path $linuxAmd64Tar) { Remove-Item -Path $linuxAmd64Tar -Force }
+if (Test-Path $linuxArm64Tar) { Remove-Item -Path $linuxArm64Tar -Force }
+
+& $tarCmd.Source -czf $linuxAmd64Tar -C $releaseDir (Split-Path -Leaf $linuxAmd64BundleDir)
+& $tarCmd.Source -czf $linuxArm64Tar -C $releaseDir (Split-Path -Leaf $linuxArm64BundleDir)
+
+Remove-Item -Path $windowsBundleDir, $linuxAmd64BundleDir, $linuxArm64BundleDir -Recurse -Force
+
 $artifacts = @(
     Join-Path $releaseDir "snispf_windows_amd64.exe"
     Join-Path $releaseDir "snispf_linux_amd64"
     Join-Path $releaseDir "snispf_linux_arm64"
+    Join-Path $releaseDir "snispf_windows_amd64_bundle.zip"
+    Join-Path $releaseDir "snispf_linux_amd64_bundle.tar.gz"
+    Join-Path $releaseDir "snispf_linux_arm64_bundle.tar.gz"
 )
 
 if (Test-Path (Join-Path $releaseDir "WinDivert.dll")) {
