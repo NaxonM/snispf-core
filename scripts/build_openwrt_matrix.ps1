@@ -77,6 +77,14 @@ foreach ($t in $targets) {
     Invoke-Go -Arguments @("build", "-trimpath", "-ldflags", $ldflags, "-o", (Join-Path $outDir $t.Out), "./cmd/snispf") -What ("build {0}" -f $t.Out)
 }
 
+$openwrtHelperSrc = Join-Path $repo "scripts\openwrt_snispf.sh"
+if (Test-Path $openwrtHelperSrc) {
+    Copy-Item -Path $openwrtHelperSrc -Destination (Join-Path $outDir "openwrt_snispf.sh") -Force
+}
+else {
+    Write-Warning "OpenWrt helper script not found at scripts/openwrt_snispf.sh"
+}
+
 Set-Or-ClearEnv -Name "GOOS" -Value $savedEnv.GOOS
 Set-Or-ClearEnv -Name "GOARCH" -Value $savedEnv.GOARCH
 Set-Or-ClearEnv -Name "GOARM" -Value $savedEnv.GOARM

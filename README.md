@@ -175,7 +175,7 @@ Copy to router:
 ```bash
 scp ./release/openwrt/snispf_openwrt_armv7 root@192.168.1.1:/tmp/
 scp ./config.json root@192.168.1.1:/tmp/snispf_config.json
-scp ./scripts/openwrt_snispf.sh root@192.168.1.1:/tmp/
+scp ./release/openwrt/openwrt_snispf.sh root@192.168.1.1:/tmp/
 ```
 
 Install and run on router:
@@ -234,7 +234,7 @@ Release outputs:
 - Core binaries: `release/snispf_windows_amd64.exe`, `release/snispf_linux_amd64`, `release/snispf_linux_arm64`
 - Bundled archives: `release/snispf_windows_amd64_bundle.zip`, `release/snispf_linux_amd64_bundle.tar.gz`, `release/snispf_linux_arm64_bundle.tar.gz`
 - Metadata: `release/checksums.txt`, `release/release_manifest.json`
-- OpenWrt: `release/openwrt/`, `release/openwrt/checksums.txt`, `release/openwrt/release_manifest.json`
+- OpenWrt: `release/openwrt/` (includes binaries + `openwrt_snispf.sh`), `release/openwrt/checksums.txt`, `release/openwrt/release_manifest.json`
 
 ## GitHub Actions Release
 

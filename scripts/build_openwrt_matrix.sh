@@ -48,6 +48,14 @@ build_one "mips" "snispf_openwrt_mips_softfloat" "" "softfloat"
 # Newer 64-bit OpenWrt devices.
 build_one "arm64" "snispf_openwrt_arm64"
 
+OPENWRT_HELPER_SRC="${REPO_ROOT}/scripts/openwrt_snispf.sh"
+if [[ -f "${OPENWRT_HELPER_SRC}" ]]; then
+  cp -f "${OPENWRT_HELPER_SRC}" "${OUT_DIR}/openwrt_snispf.sh"
+  chmod +x "${OUT_DIR}/openwrt_snispf.sh"
+else
+  echo "Warning: OpenWrt helper script not found at scripts/openwrt_snispf.sh" >&2
+fi
+
 if ! command -v sha256sum >/dev/null 2>&1; then
   echo "sha256sum is required" >&2
   exit 1
@@ -62,6 +70,10 @@ artifacts=(
   "snispf_openwrt_mips_softfloat"
   "snispf_openwrt_arm64"
 )
+
+if [[ -f "openwrt_snispf.sh" ]]; then
+  artifacts+=("openwrt_snispf.sh")
+fi
 
 sha256sum "${artifacts[@]}" > checksums.txt
 
