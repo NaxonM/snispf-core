@@ -13,13 +13,14 @@ INIT_SCRIPT="/etc/init.d/snispf"
 WATCHDOG_SCRIPT="/usr/bin/snispf-watchdog.sh"
 WATCHDOG_MARKER="# SNISPF_WATCHDOG"
 DEFAULT_WATCHDOG_CRON="*/2 * * * * ${WATCHDOG_SCRIPT} >/dev/null 2>&1 ${WATCHDOG_MARKER}"
+DEFAULT_POST_RESTART_DELAY="20"
 
 print_usage() {
   cat <<'EOF'
 SNISPF OpenWrt deployment and management script
 
 Usage:
-  ./openwrt_snispf.sh install --binary <path> [--config <path>] [--no-enable] [--no-start]
+  ./openwrt_snispf.sh install --binary <path> [--config <path>] [--no-enable] [--no-start] [--post-restart-delay SEC] [--no-delayed-restart] [--watchdog ask|auto|off]
   ./openwrt_snispf.sh start|stop|restart|status|enable|disable
   ./openwrt_snispf.sh logs [--follow] [--lines N]
   ./openwrt_snispf.sh monitor [--interval SEC] [--watch N]
@@ -31,6 +32,7 @@ Usage:
 
 Examples:
   ./openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/config.json
+  ./openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --watchdog auto
   ./openwrt_snispf.sh watchdog-install
   ./openwrt_snispf.sh monitor --watch 30 --interval 2
   ./openwrt_snispf.sh uninstall --purge
@@ -48,6 +50,66 @@ warn() {
 die() {
   echo "[snispf][error] $*" >&2
   exit 1
+}
+
+prompt_yes_no_default_yes() {
+  question="$1"
+  printf "%s [Y/n]: " "$question"
+  answer=""
+  read -r answer || true
+  case "$answer" in
+    n|N|no|NO|No)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+schedule_delayed_restart() {
+  delay="$1"
+  case "$delay" in
+    ''|*[!0-9]*)
+      die "Invalid delayed restart value: ${delay}"
+      ;;
+  esac
+
+  [ "$delay" -gt 0 ] || return 0
+
+  (
+    sleep "$delay"
+    "${INIT_SCRIPT}" restart >/dev/null 2>&1 || true
+  ) >/dev/null 2>&1 &
+
+  log "Scheduled one-time delayed restart in ${delay}s"
+}
+
+handle_watchdog_after_install() {
+  mode="$1"
+
+  case "$mode" in
+    auto)
+      watchdog_install_cmd
+      ;;
+    off)
+      log "Watchdog install skipped"
+      ;;
+    ask)
+      if [ -t 0 ] && [ -t 1 ]; then
+        if prompt_yes_no_default_yes "Install watchdog for automatic recovery?"; then
+          watchdog_install_cmd
+        else
+          log "Watchdog install skipped"
+        fi
+      else
+        watchdog_install_cmd
+      fi
+      ;;
+    *)
+      die "Invalid watchdog mode: ${mode} (expected ask|auto|off)"
+      ;;
+  esac
 }
 
 require_root() {
@@ -131,6 +193,8 @@ install_cmd() {
   config_src=""
   no_enable="0"
   no_start="0"
+  watchdog_mode="ask"
+  post_restart_delay="${DEFAULT_POST_RESTART_DELAY}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -149,6 +213,22 @@ install_cmd() {
         ;;
       --no-start)
         no_start="1"
+        ;;
+      --watchdog)
+        shift
+        [ "$#" -gt 0 ] || die "--watchdog requires ask|auto|off"
+        watchdog_mode="$1"
+        ;;
+      --no-watchdog)
+        watchdog_mode="off"
+        ;;
+      --post-restart-delay)
+        shift
+        [ "$#" -gt 0 ] || die "--post-restart-delay requires seconds"
+        post_restart_delay="$1"
+        ;;
+      --no-delayed-restart)
+        post_restart_delay="0"
         ;;
       *)
         die "Unknown option for install: $1"
@@ -184,7 +264,10 @@ install_cmd() {
     else
       "${INIT_SCRIPT}" start
     fi
+    schedule_delayed_restart "${post_restart_delay}"
   fi
+
+  handle_watchdog_after_install "${watchdog_mode}"
 
   log "Install complete"
   log "Binary: ${BIN_PATH}"
