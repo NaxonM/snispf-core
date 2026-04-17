@@ -183,21 +183,21 @@ Install and run on router:
 ```sh
 ssh root@192.168.1.1
 chmod +x /tmp/openwrt_snispf.sh
-/tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json
+ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json
 ```
 
 Enable watchdog:
 
 ```sh
-/tmp/openwrt_snispf.sh watchdog-install
+ash /tmp/openwrt_snispf.sh watchdog-install
 ```
 
 Useful operations:
 
 ```sh
-/tmp/openwrt_snispf.sh status
-/tmp/openwrt_snispf.sh logs --follow
-/tmp/openwrt_snispf.sh monitor --watch 30 --interval 2
+ash /tmp/openwrt_snispf.sh status
+ash /tmp/openwrt_snispf.sh logs --follow
+ash /tmp/openwrt_snispf.sh monitor --watch 30 --interval 2
 /tmp/openwrt_snispf.sh doctor
 ```
 
