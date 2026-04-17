@@ -1,0 +1,19 @@
+# Build and release outputs
+/release/
+
+# Local diagnostics and snapshots (can contain private network details)
+/openwrt_settings_*.txt
+
+# Runtime artifacts
+*.log
+*.pid
+
+# Local config variants
+config.local.json
+config.override.json
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

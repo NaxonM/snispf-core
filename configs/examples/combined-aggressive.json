@@ -1,0 +1,34 @@
+{
+  "LISTEN_HOST": "0.0.0.0",
+  "LISTEN_PORT": 40443,
+  "LOG_LEVEL": "info",
+  "CONNECT_IP": "203.0.113.10",
+  "CONNECT_PORT": 443,
+  "FAKE_SNI": "edge-a.example.com",
+  "BYPASS_METHOD": "combined",
+  "FRAGMENT_STRATEGY": "sni_split",
+  "FRAGMENT_DELAY": 0.05,
+  "USE_TTL_TRICK": true,
+  "FAKE_SNI_METHOD": "prefix_fake",
+  "ENDPOINTS": [
+    {
+      "NAME": "primary",
+      "IP": "203.0.113.10",
+      "PORT": 443,
+      "SNI": "edge-a.example.com",
+      "ENABLED": true
+    },
+    {
+      "NAME": "backup",
+      "IP": "203.0.113.11",
+      "PORT": 443,
+      "SNI": "edge-b.example.com",
+      "ENABLED": true
+    }
+  ],
+  "LOAD_BALANCE": "random",
+  "ENDPOINT_PROBE": true,
+  "AUTO_FAILOVER": true,
+  "FAILOVER_RETRIES": 4,
+  "PROBE_TIMEOUT_MS": 2000
+}

@@ -1,0 +1,28 @@
+{
+  "LISTEN_HOST": "127.0.0.1",
+  "LISTEN_PORT": 40443,
+  "LOG_LEVEL": "info",
+  "CONNECT_IP": "203.0.113.10",
+  "CONNECT_PORT": 443,
+  "FAKE_SNI": "edge-a.example.com",
+  "BYPASS_METHOD": "wrong_seq",
+  "FRAGMENT_STRATEGY": "sni_split",
+  "FRAGMENT_DELAY": 0.05,
+  "USE_TTL_TRICK": false,
+  "FAKE_SNI_METHOD": "raw_inject",
+  "WRONG_SEQ_CONFIRM_TIMEOUT_MS": 2000,
+  "ENDPOINTS": [
+    {
+      "NAME": "strict-primary",
+      "IP": "203.0.113.10",
+      "PORT": 443,
+      "SNI": "edge-a.example.com",
+      "ENABLED": true
+    }
+  ],
+  "LOAD_BALANCE": "failover",
+  "ENDPOINT_PROBE": true,
+  "AUTO_FAILOVER": false,
+  "FAILOVER_RETRIES": 0,
+  "PROBE_TIMEOUT_MS": 2500
+}
