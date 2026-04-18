@@ -8,6 +8,7 @@ cd "${REPO_ROOT}"
 
 OUT_DIR="${REPO_ROOT}/release/openwrt"
 mkdir -p "${OUT_DIR}"
+DEFAULT_CONFIG_PATH="${OUT_DIR}/openwrt_default_config.json"
 
 # Ensure host tests/vet are not affected by caller-provided cross-compile env vars.
 unset GOOS GOARCH GOARM GOMIPS CGO_ENABLED
@@ -17,6 +18,21 @@ go test ./...
 
 echo "Running vet..."
 go vet ./...
+
+echo "Generating default OpenWrt config..."
+go run ./cmd/snispf --generate-config "${DEFAULT_CONFIG_PATH}"
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+cfg_path = Path("release/openwrt/openwrt_default_config.json")
+cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+cfg["LOAD_BALANCE"] = "round_robin"
+cfg["AUTO_FAILOVER"] = False
+cfg["FAILOVER_RETRIES"] = 0
+cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+PY
 
 build_one() {
   local goarch="$1"
@@ -55,8 +71,45 @@ if [[ -f "${OPENWRT_HELPER_SRC}" ]]; then
   cp -f "${OPENWRT_HELPER_SRC}" "${OUT_DIR}/openwrt_snispf.sh"
   chmod +x "${OUT_DIR}/openwrt_snispf.sh"
 else
-  echo "Warning: OpenWrt helper script not found at scripts/openwrt_snispf.sh" >&2
+  echo "OpenWrt helper script not found at scripts/openwrt_snispf.sh" >&2
+  exit 1
 fi
+
+create_bundle() {
+  local binary_name="$1"
+  local bundle_name="${binary_name}_bundle.tar.gz"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  local bundle_root="${tmpdir}/snispf_openwrt_bundle"
+  mkdir -p "${bundle_root}"
+
+  cp -f "${OUT_DIR}/${binary_name}" "${bundle_root}/snispf"
+  chmod +x "${bundle_root}/snispf"
+  cp -f "${OUT_DIR}/openwrt_snispf.sh" "${bundle_root}/openwrt_snispf.sh"
+  cp -f "${DEFAULT_CONFIG_PATH}" "${bundle_root}/config.json"
+
+  cat > "${bundle_root}/README_BUNDLE.txt" <<EOF
+SNISPF OpenWrt bundle
+
+Binary target: ${binary_name}
+
+Quick deploy on router:
+1) ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json
+2) ash ./openwrt_snispf.sh status
+3) ash ./openwrt_snispf.sh logs --follow
+EOF
+
+  tar -C "${tmpdir}" -czf "${OUT_DIR}/${bundle_name}" "snispf_openwrt_bundle"
+  rm -rf "${tmpdir}"
+}
+
+echo "Packaging OpenWrt bundles..."
+create_bundle "snispf_openwrt_armv7"
+create_bundle "snispf_openwrt_armv6"
+create_bundle "snispf_openwrt_mipsle_softfloat"
+create_bundle "snispf_openwrt_mips_softfloat"
+create_bundle "snispf_openwrt_arm64"
+create_bundle "snispf_openwrt_x86_64"
 
 if ! command -v sha256sum >/dev/null 2>&1; then
   echo "sha256sum is required" >&2
@@ -65,17 +118,16 @@ fi
 
 pushd "${OUT_DIR}" >/dev/null
 
-artifacts=(
-  "snispf_openwrt_armv7"
-  "snispf_openwrt_armv6"
-  "snispf_openwrt_mipsle_softfloat"
-  "snispf_openwrt_mips_softfloat"
-  "snispf_openwrt_arm64"
-  "snispf_openwrt_x86_64"
-)
+artifacts=()
+for f in *; do
+  [[ -f "$f" ]] || continue
+  [[ "$f" == "checksums.txt" || "$f" == "release_manifest.json" ]] && continue
+  artifacts+=("$f")
+done
 
-if [[ -f "openwrt_snispf.sh" ]]; then
-  artifacts+=("openwrt_snispf.sh")
+if [[ ${#artifacts[@]} -eq 0 ]]; then
+  echo "No OpenWrt artifacts were produced" >&2
+  exit 1
 fi
 
 sha256sum "${artifacts[@]}" > checksums.txt

@@ -49,6 +49,20 @@ Invoke-Go -Arguments @("test", "./...") -What "test ./..."
 Write-Host "Running vet..."
 Invoke-Go -Arguments @("vet", "./...") -What "vet ./..."
 
+$defaultConfigPath = Join-Path $outDir "openwrt_default_config.json"
+Write-Host "Generating default OpenWrt config..."
+Invoke-Go -Arguments @("run", "./cmd/snispf", "--generate-config", $defaultConfigPath) -What "run generate-config"
+
+$defaultCfgObj = Get-Content -Path $defaultConfigPath -Raw | ConvertFrom-Json
+$defaultCfg = [ordered]@{}
+$defaultCfgObj.PSObject.Properties | ForEach-Object {
+    $defaultCfg[$_.Name] = $_.Value
+}
+$defaultCfg["LOAD_BALANCE"] = "round_robin"
+$defaultCfg["AUTO_FAILOVER"] = $false
+$defaultCfg["FAILOVER_RETRIES"] = 0
+($defaultCfg | ConvertTo-Json -Depth 10) | Set-Content -Path $defaultConfigPath -Encoding utf8
+
 $targets = @(
     # Primary target for ipq40xx/generic devices (for example Linksys EA8300).
     @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; Out = "snispf_openwrt_armv7" },
@@ -84,8 +98,51 @@ if (Test-Path $openwrtHelperSrc) {
     Copy-Item -Path $openwrtHelperSrc -Destination (Join-Path $outDir "openwrt_snispf.sh") -Force
 }
 else {
-    Write-Warning "OpenWrt helper script not found at scripts/openwrt_snispf.sh"
+    throw "OpenWrt helper script not found at scripts/openwrt_snispf.sh"
 }
+
+$tmpRoot = Join-Path $outDir "_bundle_tmp"
+if (Test-Path $tmpRoot) {
+    Remove-Item -Path $tmpRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+
+foreach ($t in $targets) {
+    $bundleRoot = Join-Path $tmpRoot "snispf_openwrt_bundle"
+    if (Test-Path $bundleRoot) {
+        Remove-Item -Path $bundleRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
+
+    Copy-Item -Path (Join-Path $outDir $t.Out) -Destination (Join-Path $bundleRoot "snispf") -Force
+    Copy-Item -Path (Join-Path $outDir "openwrt_snispf.sh") -Destination (Join-Path $bundleRoot "openwrt_snispf.sh") -Force
+    Copy-Item -Path $defaultConfigPath -Destination (Join-Path $bundleRoot "config.json") -Force
+
+    $bundleReadme = @(
+        "SNISPF OpenWrt bundle",
+        "",
+        "Binary target: $($t.Out)",
+        "",
+        "Quick deploy on router:",
+        "1) ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json",
+        "2) ash ./openwrt_snispf.sh status",
+        "3) ash ./openwrt_snispf.sh logs --follow"
+    ) -join "`n"
+    Set-Content -Path (Join-Path $bundleRoot "README_BUNDLE.txt") -Value $bundleReadme -Encoding utf8
+
+    $bundleName = "{0}_bundle.tar.gz" -f $t.Out
+    $bundlePath = Join-Path $outDir $bundleName
+    if (Test-Path $bundlePath) {
+        Remove-Item -Path $bundlePath -Force
+    }
+
+    & tar -czf $bundlePath -C $tmpRoot "snispf_openwrt_bundle"
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar packaging failed for $bundleName"
+    }
+}
+
+Remove-Item -Path $tmpRoot -Recurse -Force
 
 Set-Or-ClearEnv -Name "GOOS" -Value $savedEnv.GOOS
 Set-Or-ClearEnv -Name "GOARCH" -Value $savedEnv.GOARCH
