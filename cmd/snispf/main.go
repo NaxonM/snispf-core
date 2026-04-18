@@ -194,7 +194,9 @@ func main() {
 		log.Fatal("invalid listen/connect port")
 	}
 
+	cfgBeforeNormalize := cfg
 	utils.NormalizeConfig(&cfg)
+	precedenceWarnings := configPrecedenceWarnings(cfgBeforeNormalize)
 	activeEndpoints := utils.EnabledEndpoints(cfg.Endpoints)
 	if len(activeEndpoints) == 0 {
 		log.Fatal("no valid enabled endpoints in config")
@@ -238,6 +240,9 @@ func main() {
 	}
 
 	configureLogger(cfg.LogLevel, *quiet || *quietShort, *verbose || *verboseShort)
+	for _, warning := range precedenceWarnings {
+		logx.Warnf("%s", warning)
+	}
 
 	runtimes, err := buildServerRuntimes(cfg, *noRaw)
 	if err != nil {
@@ -275,6 +280,39 @@ func main() {
 	case runErr := <-errCh:
 		log.Fatal(runErr)
 	}
+}
+
+func configPrecedenceWarnings(cfg utils.Config) []string {
+	if len(cfg.Listeners) > 0 || len(cfg.Endpoints) == 0 {
+		return nil
+	}
+
+	first := cfg.Endpoints[0]
+	warnings := make([]string, 0, 3)
+
+	cfgIP := strings.TrimSpace(utils.ResolveHost(cfg.ConnectIP))
+	epIP := strings.TrimSpace(utils.ResolveHost(first.IP))
+	if cfgIP != "" && epIP != "" && cfgIP != epIP {
+		warnings = append(warnings,
+			fmt.Sprintf("config precedence: ENDPOINTS[0].IP=%q overrides CONNECT_IP=%q", first.IP, cfg.ConnectIP),
+		)
+	}
+
+	if cfg.ConnectPort > 0 && first.Port > 0 && cfg.ConnectPort != first.Port {
+		warnings = append(warnings,
+			fmt.Sprintf("config precedence: ENDPOINTS[0].PORT=%d overrides CONNECT_PORT=%d", first.Port, cfg.ConnectPort),
+		)
+	}
+
+	cfgSNI := strings.TrimSpace(cfg.FakeSNI)
+	epSNI := strings.TrimSpace(first.SNI)
+	if cfgSNI != "" && epSNI != "" && !strings.EqualFold(cfgSNI, epSNI) {
+		warnings = append(warnings,
+			fmt.Sprintf("config precedence: ENDPOINTS[0].SNI=%q overrides FAKE_SNI=%q", first.SNI, cfg.FakeSNI),
+		)
+	}
+
+	return warnings
 }
 
 func buildStrategy(cfg utils.Config, method string, injector rawinjector.Interface) bypass.Strategy {
