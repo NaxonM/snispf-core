@@ -8,6 +8,7 @@ cd "${REPO_ROOT}"
 
 RELEASE_DIR="${REPO_ROOT}/release"
 mkdir -p "${RELEASE_DIR}"
+DEFAULT_CONFIG_PATH="${RELEASE_DIR}/default_config.json"
 
 WINDOWS_BUNDLE_DIR="${RELEASE_DIR}/snispf_windows_amd64_bundle"
 LINUX_AMD64_BUNDLE_DIR="${RELEASE_DIR}/snispf_linux_amd64_bundle"
@@ -18,6 +19,9 @@ go test ./...
 
 echo "Running vet..."
 go vet ./...
+
+echo "Generating default config for bundles..."
+go run ./cmd/snispf --generate-config "${DEFAULT_CONFIG_PATH}"
 
 echo "Building release matrix..."
 GOOS=windows GOARCH=amd64 go build -o "${RELEASE_DIR}/snispf_windows_amd64.exe" ./cmd/snispf
@@ -60,11 +64,7 @@ create_bundle_layout() {
 	local bundle_dir="$1"
 	mkdir -p "${bundle_dir}/configs/examples"
 
-	if [[ -f "${REPO_ROOT}/config.json" ]]; then
-		cp -f "${REPO_ROOT}/config.json" "${bundle_dir}/config.json"
-	elif [[ -f "${REPO_ROOT}/configs/examples/fragment-baseline.json" ]]; then
-		cp -f "${REPO_ROOT}/configs/examples/fragment-baseline.json" "${bundle_dir}/config.json"
-	fi
+	cp -f "${DEFAULT_CONFIG_PATH}" "${bundle_dir}/config.json"
 
 	if [[ -d "${REPO_ROOT}/configs/examples" ]]; then
 		cp -f "${REPO_ROOT}/configs/examples/"*.json "${bundle_dir}/configs/examples/" 2>/dev/null || true

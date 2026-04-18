@@ -5,6 +5,7 @@ Set-Location $repo
 
 $releaseDir = Join-Path $repo "release"
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+$defaultConfigPath = Join-Path $releaseDir "default_config.json"
 
 $windowsBundleDir = Join-Path $releaseDir "snispf_windows_amd64_bundle"
 $linuxAmd64BundleDir = Join-Path $releaseDir "snispf_linux_amd64_bundle"
@@ -15,6 +16,9 @@ go test ./...
 
 Write-Host "Running vet..."
 go vet ./...
+
+Write-Host "Generating default config for bundles..."
+go run ./cmd/snispf --generate-config $defaultConfigPath
 
 Write-Host "Building release matrix..."
 $targets = @(
@@ -89,16 +93,7 @@ function Initialize-BundleLayout {
     New-Item -ItemType Directory -Path $BundleDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $BundleDir "configs\examples") -Force | Out-Null
 
-    $defaultConfig = Join-Path $repo "config.json"
-    if (Test-Path $defaultConfig) {
-        Copy-Item -Path $defaultConfig -Destination (Join-Path $BundleDir "config.json") -Force
-    }
-    else {
-        $fallbackConfig = Join-Path $repo "configs\examples\fragment-baseline.json"
-        if (Test-Path $fallbackConfig) {
-            Copy-Item -Path $fallbackConfig -Destination (Join-Path $BundleDir "config.json") -Force
-        }
-    }
+    Copy-Item -Path $defaultConfigPath -Destination (Join-Path $BundleDir "config.json") -Force
 
     $examplesDir = Join-Path $repo "configs\examples"
     if (Test-Path $examplesDir) {
