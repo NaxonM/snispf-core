@@ -103,6 +103,12 @@ Use this order unless you have a specific reason not to:
 3. SNI length <= `219` bytes.
 4. Generated fake ClientHello size <= `1460` bytes.
 5. Optional timeout tuning: `WRONG_SEQ_CONFIRM_TIMEOUT_MS` (default `2000`).
+6. For multi-WAN/multi-WLAN route changes, `wrong_seq` may need restart to rebind raw injector.
+
+Multi-WAN practical note:
+
+- `wrong_seq` is strict mode and is best with a single stable upstream path.
+- For automatic per-connection route adaptation across changing WAN paths, prefer `fragment`/`combined`.
 
 ## Run Modes
 
@@ -186,10 +192,22 @@ chmod +x /tmp/openwrt_snispf.sh
 ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json
 ```
 
-Enable watchdog:
+Installer behavior (default):
+
+- Schedules one delayed restart after install/start (default `20s`).
+- Asks to install watchdog in interactive shell (`--watchdog ask`).
+- In non-interactive mode, `ask` behaves like auto install.
+
+Watchdog defaults and tuning:
+
+- Default schedule is every `1` minute.
+- It restarts on down process, missing listen port, and degraded raw-injector patterns in logs.
+
+Force watchdog install or tune delayed restart:
 
 ```sh
 ash /tmp/openwrt_snispf.sh watchdog-install
+ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json --watchdog auto --post-restart-delay 20
 ```
 
 Useful operations:

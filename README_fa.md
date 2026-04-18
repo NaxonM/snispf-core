@@ -99,6 +99,12 @@ go build -o snispf.exe ./cmd/snispf
 3. طول SNI حداکثر `219` بایت باشد.
 4. اندازه fake ClientHello حداکثر `1460` بایت باشد.
 5. در صورت نیاز timeout را با `WRONG_SEQ_CONFIRM_TIMEOUT_MS` تنظیم کنید (پیش فرض `2000`).
+6. در تغییر مسیر multi-WAN/multi-WLAN ممکن است برای rebind شدن raw injector نیاز به restart باشد.
+
+نکته عملی برای multi-WAN:
+
+- `wrong_seq` حالت strict است و برای یک مسیر upstream پایدار بهتر کار می کند.
+- برای سازگاری خودکار per-connection با تغییر مسیر WAN، `fragment` یا `combined` انتخاب بهتری است.
 
 ## حالت های اجرا
 
@@ -169,7 +175,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_openwrt_matrix.ps1
 ```bash
 scp ./release/openwrt/snispf_openwrt_armv7 root@192.168.1.1:/tmp/
 scp ./config.json root@192.168.1.1:/tmp/snispf_config.json
-scp ./scripts/openwrt_snispf.sh root@192.168.1.1:/tmp/
+scp ./release/openwrt/openwrt_snispf.sh root@192.168.1.1:/tmp/
 ```
 
 نصب روی روتر:
@@ -180,10 +186,22 @@ chmod +x /tmp/openwrt_snispf.sh
 ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json
 ```
 
-فعال سازی watchdog:
+رفتار پیش فرض installer:
+
+- بعد از نصب/استارت یک delayed restart یک بار انجام می دهد (پیش فرض `20s`).
+- در حالت تعاملی درباره نصب watchdog سوال می پرسد (`--watchdog ask`).
+- در حالت غیرتعاملی، `ask` به صورت خودکار مثل نصب خودکار عمل می کند.
+
+پیش فرض watchdog و تنظیم آن:
+
+- زمان بندی پیش فرض هر `1` دقیقه است.
+- در حالت process down، باز نبودن پورت listen و الگوهای degraded مربوط به raw injector سرویس را restart می کند.
+
+نصب اجباری watchdog یا تنظیم delayed restart:
 
 ```sh
 ash /tmp/openwrt_snispf.sh watchdog-install
+ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json --watchdog auto --post-restart-delay 20
 ```
 
 دستورهای مهم مدیریت:
