@@ -87,6 +87,9 @@ jobs:
       - build-openwrt
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Download core artifacts
         uses: actions/download-artifact@v4
         with:
@@ -124,9 +127,31 @@ jobs:
             cp -f dist/openwrt/release_manifest.json dist/publish/openwrt_release_manifest.json
           fi
 
+      - name: Prepare release notes from changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tag="${GITHUB_REF_NAME}"
+
+          awk -v tag="$tag" '
+            $0 ~ "^## \\[" tag "\\]" {in_section=1; next}
+            in_section && $0 ~ "^## \\[" {exit}
+            in_section {print}
+          ' CHANGELOG.md > dist/release-notes.md
+
+          if [[ ! -s dist/release-notes.md ]]; then
+            {
+              echo "Release ${tag}"
+              echo
+              echo "No changelog section found for ${tag} in CHANGELOG.md."
+            } > dist/release-notes.md
+          fi
+
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/publish/*
-          generate_release_notes: true
+          body_path: dist/release-notes.md
+          generate_release_notes: false
