@@ -229,6 +229,11 @@ sudo bash ./install_linux_service.sh logs --lines 120
 
 The default unit sets `Restart=always` and `LimitNOFILE=65535`.
 
+Core recovery behavior (all platforms):
+
+- With multiple enabled `ENDPOINTS` and load balancing configured, the core now chains fallback attempts across endpoints when dial or strategy confirmation fails.
+- If critical failures repeat in a short window (for example repeated `upstream_unreachable` or confirmation failures), the core can trigger an internal runtime rebuild as a final recovery step.
+
 ---
 
 ## OpenWrt deployment

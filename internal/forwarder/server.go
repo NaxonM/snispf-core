@@ -20,19 +20,23 @@ import (
 )
 
 type Server struct {
-	ListenHost      string
-	ListenPort      int
-	ConnectIP       string
-	ConnectPort     int
-	FakeSNI         string
-	Endpoints       []utils.Endpoint
-	LoadBalance     string
-	AutoFailover    bool
-	FailoverRetries int
-	InterfaceIP     string
-	Strategy        bypass.Strategy
-	Injector        rawinjector.Interface
-	lbCounter       atomic.Uint64
+	ListenHost       string
+	ListenPort       int
+	ConnectIP        string
+	ConnectPort      int
+	FakeSNI          string
+	Endpoints        []utils.Endpoint
+	LoadBalance      string
+	AutoFailover     bool
+	FailoverRetries  int
+	InterfaceIP      string
+	Strategy         bypass.Strategy
+	Injector         rawinjector.Interface
+	OnCriticalError  func(reason string)
+	CriticalFailures int
+	lbCounter        atomic.Uint64
+	failureStreak    atomic.Uint64
+	restartSent      atomic.Bool
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -84,8 +88,9 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 	endpoints := s.endpointsOrDefault()
 	base := s.pickBaseIndex(len(endpoints))
 	retries := 0
-	if strings.EqualFold(s.LoadBalance, "failover") {
-		// In explicit failover mode, try each endpoint once per incoming connection.
+	if len(endpoints) > 1 && strings.TrimSpace(s.LoadBalance) != "" {
+		// When load balancing is configured and multiple endpoints are available,
+		// attempt each endpoint once before dropping this connection.
 		retries = len(endpoints) - 1
 	}
 	if s.AutoFailover && s.FailoverRetries > retries {
@@ -102,6 +107,7 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 	var registeredPort int
 	registered := false
 	var lastConnectErr error
+	var lastStrategyErr error
 	for attempt := 0; attempt < totalAttempts; attempt++ {
 		selected = endpoints[(base+attempt)%len(endpoints)]
 
@@ -145,6 +151,48 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 
 		outgoing, err = net.DialTCP("tcp4", laddr, raddr)
 		if err == nil {
+			applyOK := s.Strategy.Apply(ctx, incoming, outgoing, selected.SNI, first)
+			if applyOK {
+				break
+			}
+
+			if s.Strategy.Name() == "wrong_seq" {
+				diag := strings.TrimSpace(rawinjector.RawDiagnostic())
+				if diag != "" {
+					lastStrategyErr = fmt.Errorf("wrong_seq confirmation failed: %s", diag)
+				} else {
+					lastStrategyErr = fmt.Errorf("wrong_seq confirmation failed")
+				}
+			} else {
+				lastStrategyErr = fmt.Errorf("strategy apply returned false: %s", s.Strategy.Name())
+			}
+
+			if attempt+1 < totalAttempts {
+				logx.Warnf("strategy apply failed endpoint=%s:%d strategy=%s attempt=%d/%d err=%v; trying next endpoint", selected.IP, selected.Port, s.Strategy.Name(), attempt+1, totalAttempts, lastStrategyErr)
+				if registered {
+					s.Injector.CleanupPort(registeredPort)
+					registered = false
+					registeredPort = 0
+				}
+				_ = outgoing.Close()
+				outgoing = nil
+				continue
+			}
+
+			if registered {
+				s.Injector.CleanupPort(registeredPort)
+				registered = false
+				registeredPort = 0
+			}
+
+			if s.Strategy.Name() == "wrong_seq" {
+				logx.Warnf("connection dropped before upstream first-write: strategy=wrong_seq request_sni=%q endpoint=%s:%d reason=strategy_apply_failed err=%v", requestSNI, selected.IP, selected.Port, lastStrategyErr)
+				_ = outgoing.Close()
+				return
+			}
+
+			logx.Warnf("strategy apply returned false: strategy=%s request_sni=%q endpoint=%s:%d; falling back to direct first-write", s.Strategy.Name(), requestSNI, selected.IP, selected.Port)
+			_, _ = outgoing.Write(first)
 			break
 		}
 		lastConnectErr = err
@@ -156,9 +204,16 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 		}
 	}
 	if outgoing == nil {
-		logx.Warnf("connection dropped before bypass: request_sni=%q reason=upstream_unreachable last_error=%v", requestSNI, lastConnectErr)
+		if lastStrategyErr != nil {
+			logx.Warnf("connection dropped before bypass: request_sni=%q reason=all_endpoints_failed_confirmation last_connect_error=%v last_strategy_error=%v action=core_restart_recommended", requestSNI, lastConnectErr, lastStrategyErr)
+			s.reportFailure("all_endpoints_failed_confirmation")
+		} else {
+			logx.Warnf("connection dropped before bypass: request_sni=%q reason=upstream_unreachable last_error=%v action=core_restart_recommended", requestSNI, lastConnectErr)
+			s.reportFailure("upstream_unreachable")
+		}
 		return
 	}
+	s.reportSuccess()
 	defer outgoing.Close()
 	if registered {
 		defer s.Injector.CleanupPort(registeredPort)
@@ -166,20 +221,6 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 	_ = outgoing.SetKeepAlive(true)
 	_ = outgoing.SetKeepAlivePeriod(60 * time.Second)
 	logx.Debugf("selected endpoint ip=%s port=%d sni=%s", selected.IP, selected.Port, selected.SNI)
-
-	if ok := s.Strategy.Apply(ctx, incoming, outgoing, selected.SNI, first); !ok {
-		if s.Strategy.Name() == "wrong_seq" {
-			diag := strings.TrimSpace(rawinjector.RawDiagnostic())
-			if diag != "" {
-				logx.Warnf("connection dropped before upstream first-write: strategy=wrong_seq request_sni=%q endpoint=%s:%d reason=strategy_apply_failed detail=%s", requestSNI, selected.IP, selected.Port, diag)
-			} else {
-				logx.Warnf("connection dropped before upstream first-write: strategy=wrong_seq request_sni=%q endpoint=%s:%d reason=strategy_apply_failed", requestSNI, selected.IP, selected.Port)
-			}
-			return
-		}
-		logx.Warnf("strategy apply returned false: strategy=%s request_sni=%q endpoint=%s:%d; falling back to direct first-write", s.Strategy.Name(), requestSNI, selected.IP, selected.Port)
-		_, _ = outgoing.Write(first)
-	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -198,6 +239,30 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 		_ = incoming.CloseWrite()
 	}()
 	wg.Wait()
+}
+
+func (s *Server) reportSuccess() {
+	s.failureStreak.Store(0)
+	s.restartSent.Store(false)
+}
+
+func (s *Server) reportFailure(reason string) {
+	threshold := s.CriticalFailures
+	if threshold <= 0 {
+		threshold = 12
+	}
+	streak := s.failureStreak.Add(1)
+	if int(streak) < threshold {
+		return
+	}
+	if s.OnCriticalError == nil {
+		return
+	}
+	if !s.restartSent.CompareAndSwap(false, true) {
+		return
+	}
+	logx.Warnf("critical recovery threshold reached listener=%s:%d streak=%d threshold=%d reason=%s action=core_internal_restart", s.ListenHost, s.ListenPort, streak, threshold, reason)
+	s.OnCriticalError(reason)
 }
 
 func (s *Server) endpointsOrDefault() []utils.Endpoint {

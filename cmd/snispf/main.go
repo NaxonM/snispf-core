@@ -244,12 +244,20 @@ func main() {
 		logx.Warnf("%s", warning)
 	}
 
-	runtimes, err := buildServerRuntimes(cfg, *noRaw)
+	restartReqCh := make(chan string, 1)
+	onCriticalRestart := func(reason string) {
+		select {
+		case restartReqCh <- reason:
+		default:
+		}
+	}
+
+	runtimes, err := buildServerRuntimes(cfg, *noRaw, onCriticalRestart)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	fmt.Print(banner)
@@ -261,24 +269,74 @@ func main() {
 		printRuntimeModeHint(rt.cfg, rt.injector != nil)
 	}
 
-	errCh := make(chan error, len(runtimes))
-	for i := range runtimes {
-		rt := runtimes[i]
-		if rt.injector != nil {
-			defer rt.injector.Stop()
-		}
-		go func(name string, srv *forwarder.Server) {
-			if runErr := srv.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
-				errCh <- fmt.Errorf("listener %s failed: %w", name, runErr)
-			}
-		}(rt.name, rt.server)
-	}
+	lastRestartAt := time.Time{}
+	restartBurst := 0
 
-	select {
-	case <-ctx.Done():
-		return
-	case runErr := <-errCh:
-		log.Fatal(runErr)
+	for {
+		runCtx, cancelRun := context.WithCancel(rootCtx)
+		errCh := make(chan error, len(runtimes))
+
+		for i := range runtimes {
+			rt := runtimes[i]
+			go func(name string, srv *forwarder.Server) {
+				if runErr := srv.Run(runCtx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+					errCh <- fmt.Errorf("listener %s failed: %w", name, runErr)
+				}
+			}(rt.name, rt.server)
+		}
+
+		select {
+		case <-rootCtx.Done():
+			cancelRun()
+			for i := range runtimes {
+				if runtimes[i].injector != nil {
+					runtimes[i].injector.Stop()
+				}
+			}
+			return
+		case runErr := <-errCh:
+			cancelRun()
+			for i := range runtimes {
+				if runtimes[i].injector != nil {
+					runtimes[i].injector.Stop()
+				}
+			}
+			log.Fatal(runErr)
+		case reason := <-restartReqCh:
+			now := time.Now()
+			if !lastRestartAt.IsZero() && now.Sub(lastRestartAt) < 20*time.Second {
+				restartBurst++
+			} else {
+				restartBurst = 1
+			}
+			lastRestartAt = now
+			if restartBurst > 3 {
+				cancelRun()
+				for i := range runtimes {
+					if runtimes[i].injector != nil {
+						runtimes[i].injector.Stop()
+					}
+				}
+				log.Fatalf("internal recovery aborted: repeated restart loop detected reason=%s", reason)
+			}
+
+			logx.Warnf("internal recovery requested reason=%s action=rebuild_runtimes burst=%d", reason, restartBurst)
+			cancelRun()
+			for i := range runtimes {
+				if runtimes[i].injector != nil {
+					runtimes[i].injector.Stop()
+				}
+			}
+
+			runtimes, err = buildServerRuntimes(cfg, *noRaw, onCriticalRestart)
+			if err != nil {
+				log.Fatal(err)
+			}
+			for i := range runtimes {
+				rt := runtimes[i]
+				printRuntimeModeHint(rt.cfg, rt.injector != nil)
+			}
+		}
 	}
 }
 
@@ -335,10 +393,10 @@ type serverRuntime struct {
 	injector rawinjector.Interface
 }
 
-func buildServerRuntimes(cfg utils.Config, noRaw bool) ([]serverRuntime, error) {
+func buildServerRuntimes(cfg utils.Config, noRaw bool, onCritical func(reason string)) ([]serverRuntime, error) {
 	if len(cfg.Listeners) == 0 {
 		// Endpoints are already probed at the top level; skip inner probe.
-		rt, err := buildSingleRuntime(cfg, noRaw, true, "primary", cfg.ListenHost, cfg.ListenPort, cfg.Endpoints, cfg.BypassMethod)
+		rt, err := buildSingleRuntime(cfg, noRaw, true, "primary", cfg.ListenHost, cfg.ListenPort, cfg.Endpoints, cfg.BypassMethod, onCritical)
 		if err != nil {
 			return nil, err
 		}
@@ -363,7 +421,7 @@ func buildServerRuntimes(cfg utils.Config, noRaw bool) ([]serverRuntime, error) 
 			method = cfg.BypassMethod
 		}
 
-		rt, err := buildSingleRuntime(cfg, noRaw, false, name, ls.ListenHost, ls.ListenPort, endpoints, method)
+		rt, err := buildSingleRuntime(cfg, noRaw, false, name, ls.ListenHost, ls.ListenPort, endpoints, method, onCritical)
 		if err != nil {
 			return nil, err
 		}
@@ -372,7 +430,7 @@ func buildServerRuntimes(cfg utils.Config, noRaw bool) ([]serverRuntime, error) 
 	return runtimes, nil
 }
 
-func buildSingleRuntime(baseCfg utils.Config, noRaw bool, probeAlreadyDone bool, name, listenHost string, listenPort int, endpoints []utils.Endpoint, method string) (serverRuntime, error) {
+func buildSingleRuntime(baseCfg utils.Config, noRaw bool, probeAlreadyDone bool, name, listenHost string, listenPort int, endpoints []utils.Endpoint, method string, onCritical func(reason string)) (serverRuntime, error) {
 	cfg := baseCfg
 	method = strings.ToLower(strings.TrimSpace(method))
 	if method == "" {
@@ -435,6 +493,12 @@ func buildSingleRuntime(baseCfg utils.Config, noRaw bool, probeAlreadyDone bool,
 		InterfaceIP:     interfaceIP,
 		Strategy:        strategy,
 		Injector:        injector,
+		OnCriticalError: onCritical,
+	}
+	if len(endpoints) > 1 && strings.TrimSpace(cfg.LoadBalance) != "" {
+		srv.CriticalFailures = 8
+	} else {
+		srv.CriticalFailures = 20
 	}
 
 	return serverRuntime{name: name, cfg: cfg, server: srv, injector: injector}, nil
