@@ -504,9 +504,15 @@ func (i *injector) injectFrame(frame []byte) error {
 	if len(frame) < 20 || (frame[0]>>4) != 4 {
 		return syscall.EINVAL
 	}
+	ifidx := i.chooseSendIfindex()
+	if ifidx <= 0 {
+		err := fmt.Errorf("linux raw injector: no route interface available for send")
+		setRawDiagnostic(err.Error())
+		return err
+	}
 	return syscall.Sendto(i.fd, frame, 0, &syscall.SockaddrLinklayer{
 		Protocol: htons(ethPIP),
-		Ifindex:  i.ifIndex,
+		Ifindex:  ifidx,
 	})
 }
 
