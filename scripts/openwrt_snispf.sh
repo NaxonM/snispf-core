@@ -12,7 +12,7 @@ PID_FILE="/var/run/snispf.pid"
 INIT_SCRIPT="/etc/init.d/snispf"
 WATCHDOG_SCRIPT="/usr/bin/snispf-watchdog.sh"
 WATCHDOG_MARKER="# SNISPF_WATCHDOG"
-DEFAULT_WATCHDOG_CRON="*/2 * * * * ${WATCHDOG_SCRIPT} >/dev/null 2>&1 ${WATCHDOG_MARKER}"
+DEFAULT_WATCHDOG_CRON="*/1 * * * * ${WATCHDOG_SCRIPT} >/dev/null 2>&1 ${WATCHDOG_MARKER}"
 DEFAULT_POST_RESTART_DELAY="20"
 
 print_usage() {
@@ -467,8 +467,8 @@ if [ -f "${CONFIG_PATH}" ]; then
 fi
 
 if [ -f "${LOG_FILE}" ]; then
-  if tail -n 30 "${LOG_FILE}" | grep -qi "panic\|fatal\|segmentation fault"; then
-    log "Detected fatal pattern in log tail, restarting"
+  if tail -n 60 "${LOG_FILE}" | grep -qi "panic\|fatal\|segmentation fault\|raw injector unavailable at runtime\|wrong_seq requires raw injector support\|raw injector route-change detected"; then
+    log "Detected fatal/degraded runtime pattern in log tail, restarting"
     "${INIT_SCRIPT}" restart || true
     exit 0
   fi

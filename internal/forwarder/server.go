@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,9 +102,20 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 			continue
 		}
 
+		dynamicIP := utils.GetDefaultInterfaceIPv4(selected.IP)
+		bindIP := s.InterfaceIP
+		if s.Injector == nil && strings.TrimSpace(dynamicIP) != "" {
+			// In non-raw modes, pick source IP per selected upstream endpoint
+			// so multi-WAN route changes are reflected without process restart.
+			bindIP = dynamicIP
+		}
+		if s.Injector != nil && s.InterfaceIP != "" && strings.TrimSpace(dynamicIP) != "" && dynamicIP != s.InterfaceIP {
+			logx.Warnf("raw injector route-change detected old_local_ip=%s new_local_ip=%s endpoint=%s; restart service to rebind injector", s.InterfaceIP, dynamicIP, selected.IP)
+		}
+
 		var laddr *net.TCPAddr
-		if s.InterfaceIP != "" {
-			laddr = &net.TCPAddr{IP: net.ParseIP(s.InterfaceIP)}
+		if bindIP != "" {
+			laddr = &net.TCPAddr{IP: net.ParseIP(bindIP)}
 		}
 
 		if s.Injector != nil {
@@ -126,7 +138,7 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 			break
 		}
 		lastConnectErr = err
-		logx.Warnf("upstream dial failed endpoint=%s:%d local_ip=%s attempt=%d/%d err=%v", selected.IP, selected.Port, s.InterfaceIP, attempt+1, retries+1, err)
+		logx.Warnf("upstream dial failed endpoint=%s:%d local_ip=%s attempt=%d/%d err=%v", selected.IP, selected.Port, bindIP, attempt+1, retries+1, err)
 		if registered {
 			s.Injector.CleanupPort(registeredPort)
 			registered = false
