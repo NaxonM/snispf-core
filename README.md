@@ -262,6 +262,13 @@ Release outputs:
 - Metadata: `release/checksums.txt`, `release/release_manifest.json`
 - OpenWrt: `release/openwrt/` (includes binaries + `openwrt_snispf.sh`), `release/openwrt/checksums.txt`, `release/openwrt/release_manifest.json`
 
+OpenWrt matrix includes `armv7`, `armv6`, `mipsle_softfloat`, `mips_softfloat`, `arm64`, and `x86_64` binaries.
+
+OpenWrt runtime note:
+
+- If logs show `socket: too many open files`, your service file descriptor limit is too low.
+- Reinstall/upgrade with the latest `openwrt_snispf.sh` so the generated init script sets `procd` nofile limits, then restart the service.
+
 ## GitHub Actions Release
 
 Workflow: `.github/workflows/release.yml`

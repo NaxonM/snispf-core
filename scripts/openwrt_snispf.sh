@@ -162,6 +162,7 @@ start_service() {
   procd_open_instance
   procd_set_param command /bin/sh -c "exec \"${PROG}\" --config \"${CONFIG}\" >> \"${LOG_FILE}\" 2>&1"
   procd_set_param pidfile "${PID_FILE}"
+  procd_set_param limits nofile="65535 65535"
   procd_set_param respawn 3600 5 5
   procd_set_param file "${CONFIG}"
   procd_close_instance

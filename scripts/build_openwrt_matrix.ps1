@@ -58,7 +58,9 @@ $targets = @(
     @{ GOOS = "linux"; GOARCH = "mipsle"; GOMIPS = "softfloat"; Out = "snispf_openwrt_mipsle_softfloat" },
     @{ GOOS = "linux"; GOARCH = "mips"; GOMIPS = "softfloat"; Out = "snispf_openwrt_mips_softfloat" },
     # Newer 64-bit OpenWrt devices.
-    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "snispf_openwrt_arm64" }
+    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "snispf_openwrt_arm64" },
+    # x86_64 OpenWrt targets.
+    @{ GOOS = "linux"; GOARCH = "amd64"; Out = "snispf_openwrt_x86_64" }
 )
 
 $ldflags = "-s -w -buildid="

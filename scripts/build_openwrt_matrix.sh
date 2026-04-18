@@ -47,6 +47,8 @@ build_one "mipsle" "snispf_openwrt_mipsle_softfloat" "" "softfloat"
 build_one "mips" "snispf_openwrt_mips_softfloat" "" "softfloat"
 # Newer 64-bit OpenWrt devices.
 build_one "arm64" "snispf_openwrt_arm64"
+# x86_64 OpenWrt targets.
+build_one "amd64" "snispf_openwrt_x86_64"
 
 OPENWRT_HELPER_SRC="${REPO_ROOT}/scripts/openwrt_snispf.sh"
 if [[ -f "${OPENWRT_HELPER_SRC}" ]]; then
@@ -69,6 +71,7 @@ artifacts=(
   "snispf_openwrt_mipsle_softfloat"
   "snispf_openwrt_mips_softfloat"
   "snispf_openwrt_arm64"
+  "snispf_openwrt_x86_64"
 )
 
 if [[ -f "openwrt_snispf.sh" ]]; then
