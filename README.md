@@ -262,6 +262,11 @@ ash ./openwrt_snispf.sh watchdog-install
 ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json --watchdog auto --post-restart-delay 20
 ```
 
+Watchdog/core recovery coordination:
+
+- The deployment watchdog now detects core internal recovery signals and applies a short hold window before external restart escalation.
+- This prevents overlapping restart loops when core is already performing internal runtime rebuild recovery.
+
 Useful operations:
 
 ```sh

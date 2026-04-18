@@ -435,6 +435,8 @@ CONFIG_PATH="/etc/snispf/config.json"
 LOG_FILE="/var/log/snispf/core.log"
 ROUTE_STATE_FILE="/var/run/snispf.watchdog.route"
 FAIL_COUNT_FILE="/var/run/snispf.watchdog.failcnt"
+RECOVERY_HOLD_FILE="/var/run/snispf.watchdog.recovery_hold_until"
+RECOVERY_HOLD_SEC="90"
 FAIL_THRESHOLD="3"
 
 log() {
@@ -461,6 +463,26 @@ write_fail_count() {
   echo "$1" > "${FAIL_COUNT_FILE}"
 }
 
+now_epoch() {
+  date +%s
+}
+
+set_recovery_hold() {
+  hold_until="$(( $(now_epoch) + RECOVERY_HOLD_SEC ))"
+  echo "${hold_until}" > "${RECOVERY_HOLD_FILE}"
+}
+
+recovery_hold_active() {
+  [ -f "${RECOVERY_HOLD_FILE}" ] || return 1
+  hold_until="$(cat "${RECOVERY_HOLD_FILE}" 2>/dev/null || echo 0)"
+  [ "${hold_until}" -gt "$(now_epoch)" ]
+}
+
+core_internal_recovery_seen() {
+  [ -f "${LOG_FILE}" ] || return 1
+  tail -n 120 "${LOG_FILE}" | grep -Eqi "action=core_internal_restart|internal recovery requested"
+}
+
 route_signature() {
   target_ip="$1"
   line="$(ip route get "${target_ip}" 2>/dev/null | head -n 1 || true)"
@@ -485,7 +507,16 @@ if ! "${INIT_SCRIPT}" enabled >/dev/null 2>&1; then
   exit 0
 fi
 
+if core_internal_recovery_seen; then
+  set_recovery_hold
+fi
+
 if ! "${INIT_SCRIPT}" running >/dev/null 2>&1; then
+  if recovery_hold_active; then
+    log "Service not running, but core internal recovery is active; deferring watchdog restart"
+    write_fail_count 0
+    exit 0
+  fi
   log "Service not running, restarting"
   "${INIT_SCRIPT}" restart || true
   write_fail_count 0
@@ -496,6 +527,11 @@ if [ -f "${CONFIG_PATH}" ]; then
   port="$(extract_port || true)"
   if [ -n "${port}" ]; then
     if ! netstat -lnt 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+      if recovery_hold_active; then
+        log "Listen port not ready, but core internal recovery is active; deferring watchdog restart"
+        write_fail_count 0
+        exit 0
+      fi
       log "Service running but port ${port} not listening, restarting"
       "${INIT_SCRIPT}" restart || true
       write_fail_count 0
@@ -509,6 +545,12 @@ if [ -f "${CONFIG_PATH}" ]; then
     if [ -n "${sig}" ]; then
       old_sig="$(cat "${ROUTE_STATE_FILE}" 2>/dev/null || true)"
       if [ -n "${old_sig}" ] && [ "${old_sig}" != "${sig}" ]; then
+        if recovery_hold_active; then
+          log "Route changed (${old_sig} -> ${sig}) while core internal recovery is active; deferring watchdog restart"
+          echo "${sig}" > "${ROUTE_STATE_FILE}"
+          write_fail_count 0
+          exit 0
+        fi
         log "Route path changed (${old_sig} -> ${sig}), restarting to rebind runtime"
         echo "${sig}" > "${ROUTE_STATE_FILE}"
         "${INIT_SCRIPT}" restart || true
@@ -522,6 +564,11 @@ fi
 
 if [ -f "${LOG_FILE}" ]; then
   if tail -n 60 "${LOG_FILE}" | grep -qi "panic\|fatal\|segmentation fault\|raw injector unavailable at runtime\|wrong_seq requires raw injector support\|raw injector route-change detected"; then
+    if recovery_hold_active; then
+      log "Detected fatal/degraded pattern but core internal recovery is active; deferring watchdog restart"
+      write_fail_count 0
+      exit 0
+    fi
     log "Detected fatal/degraded runtime pattern in log tail, restarting"
     "${INIT_SCRIPT}" restart || true
     write_fail_count 0
@@ -530,6 +577,11 @@ if [ -f "${LOG_FILE}" ]; then
 fi
 
 if degraded_pattern_seen; then
+  if recovery_hold_active; then
+    log "Degraded traffic pattern seen while core internal recovery is active; skipping watchdog escalation"
+    write_fail_count 0
+    exit 0
+  fi
   cnt="$(read_fail_count)"
   cnt=$((cnt + 1))
   write_fail_count "${cnt}"
