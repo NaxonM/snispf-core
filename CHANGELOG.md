@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [v0.1.6] - 2026-04-18
+
+### Fixed
+- PowerShell release matrix packaging no longer collides with the read-only automatic `$IsLinux` variable in `build_release_matrix.ps1`.
+- Bundle layout initialization now uses an explicit Linux service file flag, restoring successful end-to-end bundle generation on Windows hosts.
+
 ## [v0.1.5] - 2026-04-18
 
 ### Added
