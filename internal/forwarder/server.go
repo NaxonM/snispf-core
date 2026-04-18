@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -83,16 +84,25 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 	endpoints := s.endpointsOrDefault()
 	base := s.pickBaseIndex(len(endpoints))
 	retries := 0
-	if s.AutoFailover {
+	if strings.EqualFold(s.LoadBalance, "failover") {
+		// In explicit failover mode, try each endpoint once per incoming connection.
+		retries = len(endpoints) - 1
+	}
+	if s.AutoFailover && s.FailoverRetries > retries {
 		retries = s.FailoverRetries
 	}
+	maxRetries := len(endpoints) - 1
+	if retries > maxRetries {
+		retries = maxRetries
+	}
+	totalAttempts := retries + 1
 
 	var outgoing *net.TCPConn
 	var selected utils.Endpoint
 	var registeredPort int
 	registered := false
 	var lastConnectErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	for attempt := 0; attempt < totalAttempts; attempt++ {
 		selected = endpoints[(base+attempt)%len(endpoints)]
 
 		raddr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", selected.IP, selected.Port))
@@ -138,7 +148,7 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 			break
 		}
 		lastConnectErr = err
-		logx.Warnf("upstream dial failed endpoint=%s:%d local_ip=%s attempt=%d/%d err=%v", selected.IP, selected.Port, bindIP, attempt+1, retries+1, err)
+		logx.Warnf("upstream dial failed endpoint=%s:%d local_ip=%s attempt=%d/%d err=%v", selected.IP, selected.Port, bindIP, attempt+1, totalAttempts, err)
 		if registered {
 			s.Injector.CleanupPort(registeredPort)
 			registered = false
@@ -159,8 +169,15 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 
 	if ok := s.Strategy.Apply(ctx, incoming, outgoing, selected.SNI, first); !ok {
 		if s.Strategy.Name() == "wrong_seq" {
+			diag := strings.TrimSpace(rawinjector.RawDiagnostic())
+			if diag != "" {
+				logx.Warnf("connection dropped before upstream first-write: strategy=wrong_seq request_sni=%q endpoint=%s:%d reason=strategy_apply_failed detail=%s", requestSNI, selected.IP, selected.Port, diag)
+			} else {
+				logx.Warnf("connection dropped before upstream first-write: strategy=wrong_seq request_sni=%q endpoint=%s:%d reason=strategy_apply_failed", requestSNI, selected.IP, selected.Port)
+			}
 			return
 		}
+		logx.Warnf("strategy apply returned false: strategy=%s request_sni=%q endpoint=%s:%d; falling back to direct first-write", s.Strategy.Name(), requestSNI, selected.IP, selected.Port)
 		_, _ = outgoing.Write(first)
 	}
 
@@ -168,12 +185,16 @@ func (s *Server) handleConn(ctx context.Context, incoming *net.TCPConn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(outgoing, incoming)
+		if _, copyErr := io.Copy(outgoing, incoming); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, net.ErrClosed) {
+			logx.Debugf("stream copy incoming->outgoing ended with error: %v", copyErr)
+		}
 		_ = outgoing.CloseWrite()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(incoming, outgoing)
+		if _, copyErr := io.Copy(incoming, outgoing); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, net.ErrClosed) {
+			logx.Debugf("stream copy outgoing->incoming ended with error: %v", copyErr)
+		}
 		_ = incoming.CloseWrite()
 	}()
 	wg.Wait()

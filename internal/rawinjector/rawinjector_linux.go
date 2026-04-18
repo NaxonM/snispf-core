@@ -119,7 +119,7 @@ func (i *injector) Start() bool {
 
 	if i.localIP == [4]byte{} {
 		if lip, _, ok := i.routeLocalIPAndIndex(); ok {
-			copy(i.localIP[:], lip)
+			copy(i.localIP[:], lip[:])
 		}
 	}
 
@@ -210,7 +210,7 @@ func (i *injector) chooseSendIfindex() int {
 			logx.Warnf("raw injector send route changed old_ifindex=%d new_ifindex=%d", i.ifIndex, idx)
 		}
 		i.ifIndex = idx
-		copy(i.localIP[:], lip)
+		copy(i.localIP[:], lip[:])
 	}
 	return i.ifIndex
 }
