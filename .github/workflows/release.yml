@@ -133,18 +133,32 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           tag="${GITHUB_REF_NAME}"
+          default_branch="${{ github.event.repository.default_branch }}"
 
-          awk -v tag="$tag" '
-            $0 ~ "^## \\[" tag "\\]" {in_section=1; next}
-            in_section && $0 ~ "^## \\[" {exit}
-            in_section {print}
-          ' CHANGELOG.md > dist/release-notes.md
+          extract_notes() {
+            local changelog_file="$1"
+            awk -v tag="$tag" '
+              $0 ~ "^## \\[" tag "\\]" {in_section=1; next}
+              in_section && $0 ~ "^## \\[" {exit}
+              in_section {print}
+            ' "$changelog_file"
+          }
+
+          extract_notes CHANGELOG.md > dist/release-notes.md
+
+          if [[ ! -s dist/release-notes.md ]]; then
+            echo "No ${tag} section in tagged commit CHANGELOG.md; trying ${default_branch} branch copy"
+            curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${default_branch}/CHANGELOG.md" -o dist/CHANGELOG.default-branch.md || true
+            if [[ -s dist/CHANGELOG.default-branch.md ]]; then
+              extract_notes dist/CHANGELOG.default-branch.md > dist/release-notes.md || true
+            fi
+          fi
 
           if [[ ! -s dist/release-notes.md ]]; then
             {
               echo "Release ${tag}"
               echo
-              echo "No changelog section found for ${tag} in CHANGELOG.md."
+              echo "No changelog section found for ${tag} in CHANGELOG.md (tagged commit or default branch)."
             } > dist/release-notes.md
           fi
 

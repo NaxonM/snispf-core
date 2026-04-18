@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [v0.1.6] - 2026-04-18
 
+### Added
+- Core runtime now includes internal critical-failure recovery with automatic listener/runtime rebuild when repeated upstream confirmation failures cross a threshold.
+- Forwarder now exposes critical-failure escalation hooks to coordinate recovery across listener instances.
+
+### Changed
+- Endpoint attempt flow now tries additional configured upstream endpoints when strategy confirmation fails, improving strict-mode resilience under transient upstream/path issues.
+- Internal restart supervision now includes burst-loop protection to prevent repeated rapid restart storms.
+- OpenWrt watchdog flow now respects the core recovery hold window to avoid overlapping external restarts while internal recovery is in progress.
+
 ### Fixed
 - PowerShell release matrix packaging no longer collides with the read-only automatic `$IsLinux` variable in `build_release_matrix.ps1`.
 - Bundle layout initialization now uses an explicit Linux service file flag, restoring successful end-to-end bundle generation on Windows hosts.
