@@ -432,6 +432,9 @@ set -eu
 INIT_SCRIPT="/etc/init.d/snispf"
 CONFIG_PATH="/etc/snispf/config.json"
 LOG_FILE="/var/log/snispf/core.log"
+ROUTE_STATE_FILE="/var/run/snispf.watchdog.route"
+FAIL_COUNT_FILE="/var/run/snispf.watchdog.failcnt"
+FAIL_THRESHOLD="3"
 
 log() {
   logger -t snispf-watchdog "$*"
@@ -439,6 +442,38 @@ log() {
 
 extract_port() {
   sed -n 's/.*"LISTEN_PORT"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${CONFIG_PATH}" | head -n 1
+}
+
+extract_connect_ip() {
+  sed -n 's/.*"CONNECT_IP"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${CONFIG_PATH}" | head -n 1
+}
+
+read_fail_count() {
+  if [ -f "${FAIL_COUNT_FILE}" ]; then
+    cat "${FAIL_COUNT_FILE}" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
+
+write_fail_count() {
+  echo "$1" > "${FAIL_COUNT_FILE}"
+}
+
+route_signature() {
+  target_ip="$1"
+  line="$(ip route get "${target_ip}" 2>/dev/null | head -n 1 || true)"
+  [ -n "${line}" ] || return 1
+  dev="$(echo "${line}" | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+  src="$(echo "${line}" | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n 1)"
+  [ -n "${dev}" ] || return 1
+  printf '%s|%s' "${dev}" "${src}"
+}
+
+degraded_pattern_seen() {
+  [ -f "${LOG_FILE}" ] || return 1
+  tail -n 80 "${LOG_FILE}" | grep -Eqi \
+    "upstream dial failed|connection dropped before bypass|reason=upstream_unreachable|wrong_seq confirm failed|wrong_seq confirm timeout|first_write_fail|raw injector unavailable at runtime|wrong_seq requires raw injector support"
 }
 
 if [ ! -x "${INIT_SCRIPT}" ]; then
@@ -452,6 +487,7 @@ fi
 if ! "${INIT_SCRIPT}" running >/dev/null 2>&1; then
   log "Service not running, restarting"
   "${INIT_SCRIPT}" restart || true
+  write_fail_count 0
   exit 0
 fi
 
@@ -461,7 +497,24 @@ if [ -f "${CONFIG_PATH}" ]; then
     if ! netstat -lnt 2>/dev/null | grep -q ":${port}[[:space:]]"; then
       log "Service running but port ${port} not listening, restarting"
       "${INIT_SCRIPT}" restart || true
+      write_fail_count 0
       exit 0
+    fi
+  fi
+
+  connect_ip="$(extract_connect_ip || true)"
+  if [ -n "${connect_ip}" ]; then
+    sig="$(route_signature "${connect_ip}" || true)"
+    if [ -n "${sig}" ]; then
+      old_sig="$(cat "${ROUTE_STATE_FILE}" 2>/dev/null || true)"
+      if [ -n "${old_sig}" ] && [ "${old_sig}" != "${sig}" ]; then
+        log "Route path changed (${old_sig} -> ${sig}), restarting to rebind runtime"
+        echo "${sig}" > "${ROUTE_STATE_FILE}"
+        "${INIT_SCRIPT}" restart || true
+        write_fail_count 0
+        exit 0
+      fi
+      echo "${sig}" > "${ROUTE_STATE_FILE}"
     fi
   fi
 fi
@@ -470,8 +523,23 @@ if [ -f "${LOG_FILE}" ]; then
   if tail -n 60 "${LOG_FILE}" | grep -qi "panic\|fatal\|segmentation fault\|raw injector unavailable at runtime\|wrong_seq requires raw injector support\|raw injector route-change detected"; then
     log "Detected fatal/degraded runtime pattern in log tail, restarting"
     "${INIT_SCRIPT}" restart || true
+    write_fail_count 0
     exit 0
   fi
+fi
+
+if degraded_pattern_seen; then
+  cnt="$(read_fail_count)"
+  cnt=$((cnt + 1))
+  write_fail_count "${cnt}"
+  if [ "${cnt}" -ge "${FAIL_THRESHOLD}" ]; then
+    log "Repeated degraded traffic patterns detected (${cnt}/${FAIL_THRESHOLD}), restarting"
+    "${INIT_SCRIPT}" restart || true
+    write_fail_count 0
+    exit 0
+  fi
+else
+  write_fail_count 0
 fi
 EOF
   chmod 0755 "${WATCHDOG_SCRIPT}"
