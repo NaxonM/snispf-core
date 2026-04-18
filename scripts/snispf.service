@@ -1,0 +1,16 @@
+[Unit]
+Description=SNISPF Core Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/snispf/snispf --config /etc/snispf/config.json
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

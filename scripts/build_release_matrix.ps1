@@ -87,7 +87,8 @@ Remove-Item -Path $windowsBundleDir, $linuxAmd64BundleDir, $linuxArm64BundleDir 
 
 function Initialize-BundleLayout {
     param(
-        [Parameter(Mandatory = $true)][string]$BundleDir
+        [Parameter(Mandatory = $true)][string]$BundleDir,
+        [Parameter(Mandatory = $true)][bool]$IsLinux
     )
 
     New-Item -ItemType Directory -Path $BundleDir -Force | Out-Null
@@ -116,11 +117,16 @@ Quick start:
 2) Run the binary with --config ./config.json.
 3) On Windows strict wrong_seq mode requires WinDivert.dll and WinDivert64.sys next to the exe.
 "@ | Set-Content -Path (Join-Path $BundleDir "README_BUNDLE.txt") -Encoding ascii
+
+    if ($IsLinux) {
+        Copy-Item -Path (Join-Path $repo "scripts\install_linux_service.sh") -Destination (Join-Path $BundleDir "install_linux_service.sh") -Force
+        Copy-Item -Path (Join-Path $repo "scripts\snispf.service") -Destination (Join-Path $BundleDir "snispf.service") -Force
+    }
 }
 
-Initialize-BundleLayout -BundleDir $windowsBundleDir
-Initialize-BundleLayout -BundleDir $linuxAmd64BundleDir
-Initialize-BundleLayout -BundleDir $linuxArm64BundleDir
+Initialize-BundleLayout -BundleDir $windowsBundleDir -IsLinux $false
+Initialize-BundleLayout -BundleDir $linuxAmd64BundleDir -IsLinux $true
+Initialize-BundleLayout -BundleDir $linuxArm64BundleDir -IsLinux $true
 
 Copy-Item -Path (Join-Path $releaseDir "snispf_windows_amd64.exe") -Destination (Join-Path $windowsBundleDir "snispf_windows_amd64.exe") -Force
 Copy-Item -Path (Join-Path $releaseDir "snispf_linux_amd64") -Destination (Join-Path $linuxAmd64BundleDir "snispf_linux_amd64") -Force

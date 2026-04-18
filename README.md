@@ -299,6 +299,29 @@ OpenWrt runtime note:
 - If logs show `socket: too many open files`, your service file descriptor limit is too low.
 - Reinstall/upgrade with the latest `openwrt_snispf.sh` so the generated init script sets `procd` nofile limits, then restart the service.
 
+## Linux Service Deployment (Recommended)
+
+Linux bundles include a ready-to-use `systemd` service template and installer script:
+
+- `install_linux_service.sh`
+- `snispf.service`
+
+Install from a Linux bundle directory:
+
+```bash
+sudo bash ./install_linux_service.sh install --binary ./snispf_linux_amd64 --config ./config.json
+```
+
+Common operations:
+
+```bash
+sudo bash ./install_linux_service.sh status
+sudo bash ./install_linux_service.sh restart
+sudo bash ./install_linux_service.sh logs --lines 120
+```
+
+The default unit uses `Restart=always` and `LimitNOFILE=65535` to reduce file-descriptor related runtime failures under load.
+
 ## GitHub Actions Release
 
 Workflow: `.github/workflows/release.yml`

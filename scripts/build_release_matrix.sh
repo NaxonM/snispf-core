@@ -62,6 +62,7 @@ rm -rf "${WINDOWS_BUNDLE_DIR}" "${LINUX_AMD64_BUNDLE_DIR}" "${LINUX_ARM64_BUNDLE
 
 create_bundle_layout() {
 	local bundle_dir="$1"
+	local platform="$2"
 	mkdir -p "${bundle_dir}/configs/examples"
 
 	cp -f "${DEFAULT_CONFIG_PATH}" "${bundle_dir}/config.json"
@@ -83,11 +84,17 @@ Quick start:
 2) Run the binary with --config ./config.json.
 3) On Windows strict wrong_seq mode requires WinDivert.dll and WinDivert64.sys next to the exe.
 EOF
+
+	if [[ "${platform}" == "linux" ]]; then
+		cp -f "${REPO_ROOT}/scripts/install_linux_service.sh" "${bundle_dir}/install_linux_service.sh"
+		cp -f "${REPO_ROOT}/scripts/snispf.service" "${bundle_dir}/snispf.service"
+		chmod +x "${bundle_dir}/install_linux_service.sh"
+	fi
 }
 
-create_bundle_layout "${WINDOWS_BUNDLE_DIR}"
-create_bundle_layout "${LINUX_AMD64_BUNDLE_DIR}"
-create_bundle_layout "${LINUX_ARM64_BUNDLE_DIR}"
+create_bundle_layout "${WINDOWS_BUNDLE_DIR}" "windows"
+create_bundle_layout "${LINUX_AMD64_BUNDLE_DIR}" "linux"
+create_bundle_layout "${LINUX_ARM64_BUNDLE_DIR}" "linux"
 
 cp -f "${RELEASE_DIR}/snispf_windows_amd64.exe" "${WINDOWS_BUNDLE_DIR}/snispf_windows_amd64.exe"
 cp -f "${RELEASE_DIR}/snispf_linux_amd64" "${LINUX_AMD64_BUNDLE_DIR}/snispf_linux_amd64"
