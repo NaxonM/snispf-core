@@ -51,6 +51,7 @@ type injector struct {
 
 	fd      int
 	ifIndex int
+	routeMu sync.Mutex
 
 	ports   map[int]*portState
 	portsMu sync.RWMutex
@@ -87,7 +88,8 @@ func (i *injector) Start() bool {
 	if i.fd >= 0 {
 		return true
 	}
-	if i.localIP == [4]byte{} || i.remoteIP == [4]byte{} {
+	if i.remoteIP == [4]byte{} {
+		setRawDiagnostic("linux raw injector: remote IPv4 is empty/invalid")
 		return false
 	}
 
@@ -97,21 +99,28 @@ func (i *injector) Start() bool {
 	// paths where ETH_P_IP filtering can miss packets.
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_DGRAM, int(htons(ethPAll)))
 	if err != nil {
+		setRawDiagnostic(fmt.Sprintf("linux raw injector socket(AF_PACKET,SOCK_DGRAM) failed: %v", err))
 		return false
 	}
 
-	idx := i.findInterfaceIndex()
-	if idx == 0 {
-		_ = syscall.Close(fd)
-		return false
-	}
-
+	idx := i.findRouteInterfaceIndex()
 	if err := syscall.Bind(fd, &syscall.SockaddrLinklayer{
 		Protocol: htons(ethPAll),
 		Ifindex:  idx,
 	}); err != nil {
-		_ = syscall.Close(fd)
-		return false
+		// Fallback to all interfaces capture to survive route/interface churn.
+		if err2 := syscall.Bind(fd, &syscall.SockaddrLinklayer{Protocol: htons(ethPAll), Ifindex: 0}); err2 != nil {
+			setRawDiagnostic(fmt.Sprintf("linux raw injector bind failed for ifindex=%d (%v) and any-if (%v)", idx, err, err2))
+			_ = syscall.Close(fd)
+			return false
+		}
+		idx = 0
+	}
+
+	if i.localIP == [4]byte{} {
+		if lip, _, ok := i.routeLocalIPAndIndex(); ok {
+			copy(i.localIP[:], lip)
+		}
 	}
 
 	i.fd = fd
@@ -119,8 +128,91 @@ func (i *injector) Start() bool {
 	i.running.Store(true)
 	i.wg.Add(1)
 	go i.sniffLoop()
-	logx.Infof("raw injector active on ifindex=%d", idx)
+	if idx == 0 {
+		logx.Infof("raw injector active with wildcard capture (route-aware send ifindex)")
+	} else {
+		logx.Infof("raw injector active on ifindex=%d", idx)
+	}
+	setRawDiagnostic("")
 	return true
+}
+
+func (i *injector) routeLocalIPAndIndex() ([4]byte, int, bool) {
+	var out [4]byte
+	if i.remoteIP == [4]byte{} {
+		return out, 0, false
+	}
+	remote := net.IP(i.remoteIP[:]).String()
+	c, err := net.Dial("udp4", net.JoinHostPort(remote, "53"))
+	if err != nil {
+		return out, 0, false
+	}
+	defer c.Close()
+	ua, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok || ua.IP == nil {
+		return out, 0, false
+	}
+	lip := ua.IP.To4()
+	if lip == nil {
+		return out, 0, false
+	}
+	idx := findInterfaceIndexByIP(lip)
+	if idx == 0 {
+		return out, 0, false
+	}
+	copy(out[:], lip)
+	return out, idx, true
+}
+
+func findInterfaceIndexByIP(target net.IP) int {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return 0
+	}
+	for _, itf := range interfaces {
+		addrs, err := itf.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if ip4 := ipNet.IP.To4(); ip4 != nil && ip4.Equal(target) {
+				return itf.Index
+			}
+		}
+	}
+	return 0
+}
+
+func (i *injector) findRouteInterfaceIndex() int {
+	if _, idx, ok := i.routeLocalIPAndIndex(); ok {
+		return idx
+	}
+	return i.findInterfaceIndex()
+}
+
+func (i *injector) findInterfaceIndex() int {
+	if i.localIP == [4]byte{} {
+		return 0
+	}
+	target := net.IP(i.localIP[:])
+	return findInterfaceIndexByIP(target)
+}
+
+func (i *injector) chooseSendIfindex() int {
+	i.routeMu.Lock()
+	defer i.routeMu.Unlock()
+	if lip, idx, ok := i.routeLocalIPAndIndex(); ok {
+		if idx != i.ifIndex {
+			logx.Warnf("raw injector send route changed old_ifindex=%d new_ifindex=%d", i.ifIndex, idx)
+		}
+		i.ifIndex = idx
+		copy(i.localIP[:], lip)
+	}
+	return i.ifIndex
 }
 
 func (i *injector) Stop() {
@@ -219,30 +311,6 @@ func (i *injector) CleanupPort(localPort int) {
 	delete(i.ports, localPort)
 }
 
-func (i *injector) findInterfaceIndex() int {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return 0
-	}
-	target := net.IP(i.localIP[:])
-	for _, itf := range interfaces {
-		addrs, err := itf.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipNet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			if ip4 := ipNet.IP.To4(); ip4 != nil && ip4.Equal(target) {
-				return itf.Index
-			}
-		}
-	}
-	return 0
-}
-
 func (i *injector) sniffLoop() {
 	defer i.wg.Done()
 	buf := make([]byte, 65536)
@@ -285,8 +353,17 @@ func (i *injector) handlePacket(pkt []byte) {
 	srcPort := int(binary.BigEndian.Uint16(tcp[0:2]))
 	dstPort := int(binary.BigEndian.Uint16(tcp[2:4]))
 
-	outbound := equal4(srcIP, i.localIP[:]) && equal4(dstIP, i.remoteIP[:]) && dstPort == i.remotePort
-	inbound := equal4(srcIP, i.remoteIP[:]) && equal4(dstIP, i.localIP[:]) && srcPort == i.remotePort
+	if !equal4(srcIP, i.remoteIP[:]) && !equal4(dstIP, i.remoteIP[:]) {
+		return
+	}
+
+	i.portsMu.RLock()
+	_, hasSrc := i.ports[srcPort]
+	_, hasDst := i.ports[dstPort]
+	i.portsMu.RUnlock()
+
+	outbound := equal4(dstIP, i.remoteIP[:]) && dstPort == i.remotePort && hasSrc
+	inbound := equal4(srcIP, i.remoteIP[:]) && srcPort == i.remotePort && hasDst
 
 	if outbound {
 		seq := binary.BigEndian.Uint32(tcp[4:8])
