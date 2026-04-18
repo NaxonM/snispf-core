@@ -1,352 +1,191 @@
-# SNISPF Core (Go)
+# SNISPF Core
 
-Terminal-first DPI bypass core, designed to run headless as a stable runtime process.
+Terminal-first DPI bypass core for Go. Runs headless as a stable local TCP forwarder between your client and an upstream endpoint.
 
-This core follows [patterniha's SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing) DPI bypass technique. All credit for the original idea and method goes to [@patterniha](https://github.com/patterniha).
+Implements [@patterniha's SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing) technique. All credit for the original method goes to [@patterniha](https://github.com/patterniha).
 
 Persian guide: `README_fa.md`
 
-## What This Core Does
+---
 
-SNISPF runs as a local TCP forwarder between your client and upstream endpoint:
+## How it works
 
-1. Your client connects locally to SNISPF (`LISTEN_HOST:LISTEN_PORT`).
-2. SNISPF connects to your upstream endpoint (`CONNECT_IP:CONNECT_PORT`).
-3. SNISPF applies a bypass strategy (`fragment`, `fake_sni`, `combined`, or strict `wrong_seq`).
-
-This design keeps your client config simple and moves bypass behavior into one controllable core process.
-
-## Before You Start
-
-Use this section as a quick decision table for permissions and prerequisites.
-
-| Platform | Basic methods (`fragment`, `fake_sni`, `combined`) | Strict `wrong_seq` |
-|---|---|---|
-| Linux | Works unprivileged | Requires raw packet capability (`root` or `CAP_NET_RAW`) |
-| Windows | Works normally | Requires Administrator + `WinDivert.dll` + `WinDivert64.sys` |
-| OpenWrt | Works normally | Requires `CAP_NET_RAW`/root and AF_PACKET support |
-
-Run this to inspect runtime capability flags:
-
-```powershell
-.\snispf.exe --info
+```
+Your client  →  SNISPF (127.0.0.1:LISTEN_PORT)  →  Upstream endpoint (CONNECT_IP:CONNECT_PORT)
 ```
 
-`--info` is config-independent and does not require `--config` or `config.json`.
+SNISPF intercepts the outbound TLS ClientHello and applies a bypass strategy before forwarding. Your client config stays unchanged — all bypass logic lives in SNISPF.
 
-If raw injection is unavailable, `--info` can print `raw_injection_diagnostic=...` with the reason.
+---
 
-## Quickstart (4 Steps)
+## Quickstart
 
-### Step 1) Build
+### 1. Build
 
-```powershell
+```bash
 go build -o snispf.exe ./cmd/snispf
 ```
 
-### Step 2) Generate and Validate Config
+### 2. Generate and validate config
 
-```powershell
+```bash
 .\snispf.exe --generate-config .\config.json
 .\snispf.exe --config .\config.json --config-doctor
 ```
 
-### Step 3) Configure Minimal Safe Profile
+Fix any errors the doctor reports before continuing.
 
-Start from the safest baseline (`fragment`):
+### 3. Run
+
+> **`wrong_seq` requires a privileged terminal.** On Windows, run as Administrator. On Linux, run as root or grant `CAP_NET_RAW` first. See [Bypass strategies](#bypass-strategies) for details.
+
+```bash
+.\snispf.exe --config .\config.json
+```
+
+### 4. Point your client
+
+```
+Address: 127.0.0.1
+Port:    40443  (or your configured LISTEN_PORT)
+```
+
+Keep all other client protocol settings unchanged.
+
+---
+
+## Recommended config
 
 ```json
 {
   "LISTEN_HOST": "127.0.0.1",
   "LISTEN_PORT": 40443,
   "LOG_LEVEL": "info",
-  "CONNECT_IP": "188.114.98.0",
+  "CONNECT_IP": "203.0.113.10",
   "CONNECT_PORT": 443,
-  "FAKE_SNI": "auth.vercel.com",
-  "BYPASS_METHOD": "fragment"
+  "FAKE_SNI": "edge-a.example.com",
+  "BYPASS_METHOD": "wrong_seq",
+  "FRAGMENT_STRATEGY": "sni_split",
+  "FRAGMENT_DELAY": 0.05,
+  "USE_TTL_TRICK": false,
+  "FAKE_SNI_METHOD": "raw_inject",
+  "WRONG_SEQ_CONFIRM_TIMEOUT_MS": 2000,
+  "ENDPOINTS": [
+    {
+      "NAME": "strict-primary",
+      "IP": "203.0.113.10",
+      "PORT": 443,
+      "SNI": "edge-a.example.com",
+      "ENABLED": true
+    }
+  ],
+  "LOAD_BALANCE": "failover",
+  "ENDPOINT_PROBE": true,
+  "AUTO_FAILOVER": false,
+  "FAILOVER_RETRIES": 0,
+  "PROBE_TIMEOUT_MS": 2500
 }
 ```
 
-Field mapping:
-
-| Field | Meaning |
+| Field | Description |
 |---|---|
-| `LISTEN_HOST:LISTEN_PORT` | Local address your client should connect to |
-| `LOG_LEVEL` | Runtime verbosity: `error`, `warn`, `info`, `debug` |
+| `LISTEN_HOST:LISTEN_PORT` | Local address your client connects to |
 | `CONNECT_IP:CONNECT_PORT` | Upstream destination SNISPF dials |
-| `FAKE_SNI` | SNI used by fake/combined logic and endpoint defaults |
-| `BYPASS_METHOD` | Strategy (`fragment`, `fake_sni`, `combined`, `wrong_seq`) |
+| `FAKE_SNI` | SNI used by `fake_sni` and `combined` strategies |
+| `BYPASS_METHOD` | Strategy: `fragment`, `fake_sni`, `combined`, or `wrong_seq` |
+| `FRAGMENT_STRATEGY` | How to split the ClientHello (e.g. `sni_split`) |
+| `FRAGMENT_DELAY` | Inter-fragment delay in seconds |
+| `USE_TTL_TRICK` | Send fake ClientHello with low TTL before the real one |
+| `FAKE_SNI_METHOD` | Fake SNI method: `raw_inject`, `prefix_fake`, etc. |
+| `WRONG_SEQ_CONFIRM_TIMEOUT_MS` | Confirmation window for `wrong_seq` mode (default 2000) |
+| `LOAD_BALANCE` | Endpoint selection: `round_robin`, `random`, `failover` |
+| `ENDPOINT_PROBE` | Remove unreachable endpoints at startup |
+| `AUTO_FAILOVER` | Retry on dial failure |
+| `FAILOVER_RETRIES` | Number of failover attempts |
+| `PROBE_TIMEOUT_MS` | Endpoint probe timeout in milliseconds |
+| `LOG_LEVEL` | Verbosity: `error`, `warn`, `info`, `debug` |
 
-Config precedence note:
+**Config precedence:** If `ENDPOINTS` is defined, runtime dial values come from there. Top-level `CONNECT_IP`, `CONNECT_PORT`, and `FAKE_SNI` remain as backward-compatible defaults. A startup warning is logged when `ENDPOINTS[0]` overrides top-level values.
 
-- If `ENDPOINTS` exists, runtime endpoint dial values come from `ENDPOINTS`.
-- Top-level `CONNECT_IP`, `CONNECT_PORT`, and `FAKE_SNI` remain backward-compatible defaults.
-- If top-level values conflict with `ENDPOINTS[0]`, startup logs a warning showing that `ENDPOINTS[0]` overrides top-level fields.
+---
 
-### Step 4) Run and Point Client
+## Bypass strategies
 
-```powershell
+`wrong_seq` is the recommended default. It produces the most effective bypass when platform prerequisites are met. Fall back to simpler strategies only if they are not.
+
+| Strategy | Privilege required | Recommended when |
+|---|---|---|
+| **`wrong_seq`** | Yes — see table below | Default choice when prerequisites are met |
+| `combined` | No (degrades gracefully) | Raw injection unavailable but aggressive bypass needed |
+| `fake_sni` | No (degrades gracefully) | Lighter alternative to `combined` |
+| `fragment` | No | Diagnosis, constrained environments, or as a last resort |
+
+### Platform and privilege requirements
+
+| Platform | `fragment`, `fake_sni`, `combined` | `wrong_seq` |
+|---|---|---|
+| Linux | Unprivileged | **Privileged terminal** — `root` or `CAP_NET_RAW` |
+| Windows | Normal | **Administrator terminal** + `WinDivert.dll` + `WinDivert64.sys` in the same directory as the binary |
+| OpenWrt | Normal | **Privileged** — `CAP_NET_RAW` or root + AF_PACKET support |
+
+> **Windows:** The Windows release bundle includes `WinDivert.dll` and `WinDivert64.sys`. Place them in the same directory as `snispf.exe` and run from an Administrator terminal. Without both files, `wrong_seq` will fail to initialize and `--info` will report the reason.
+
+> **Linux:** Either run as root, or grant the capability once: `sudo setcap cap_net_raw+ep ./snispf`
+
+`wrong_seq` additional constraints:
+- Exactly one enabled endpoint
+- SNI length ≤ 219 bytes
+- Generated fake ClientHello ≤ 1460 bytes (both validated by `--config-doctor`)
+
+Run `.\snispf.exe --info` to inspect runtime capability flags. This flag is config-independent.
+
+---
+
+## Run modes
+
+### Direct mode
+
+```bash
 .\snispf.exe --config .\config.json
 ```
 
-Set your client to:
+One-off flag overrides (do not persist to config):
 
-- Address: `127.0.0.1`
-- Port: `40443` (or your configured `LISTEN_PORT`)
-
-Keep the rest of your client protocol settings unchanged.
-
-## Choosing a Bypass Method
-
-Use this order unless you have a specific reason not to:
-
-1. `fragment` (best first run)
-2. `fake_sni` or `combined` (next step after baseline stability)
-3. `wrong_seq` only when strict prerequisites are met
-
-`wrong_seq` guardrails and requirements:
-
-1. Exactly one enabled endpoint.
-2. Raw injection available on current platform.
-3. SNI length <= `219` bytes.
-4. Generated fake ClientHello size <= `1460` bytes.
-5. Optional timeout tuning: `WRONG_SEQ_CONFIRM_TIMEOUT_MS` (default `2000`).
-6. For multi-WAN/multi-WLAN route changes, `wrong_seq` may need restart to rebind raw injector.
-
-Multi-WAN practical note:
-
-- `wrong_seq` is strict mode and is best with a single stable upstream path.
-- For automatic per-connection route adaptation across changing WAN paths, prefer `fragment`/`combined`.
-
-## Run Modes
-
-### Direct Mode (Simplest)
-
-```powershell
-.\snispf.exe --config .\config.json
-```
-
-Optional one-off overrides:
-
-```powershell
+```bash
 .\snispf.exe --config .\config.json --listen 0.0.0.0:40443 --connect 188.114.98.0:443 --sni auth.vercel.com --method combined
 ```
 
-### Service API Mode (Desktop/Automation)
+### Service API mode
 
-```powershell
+Exposes an HTTP control API for desktop apps, launchers, and automation.
+
+```bash
 .\snispf.exe --service --service-addr 127.0.0.1:8797
-```
-
-With auth token:
-
-```powershell
 .\snispf.exe --service --service-addr 127.0.0.1:8797 --service-token your-token
 ```
 
-Use service mode when another process (UI, launcher, script) should control start/stop/health.
+API base URL: `http://127.0.0.1:8797`
 
-## Service API Quick Reference
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/status` | GET | Worker state, PID, start time |
+| `/v1/start` | POST | Validate config and start worker |
+| `/v1/stop` | POST | Stop worker |
+| `/v1/health` | GET | Endpoint TCP probe + `wrong_seq` counters |
+| `/v1/validate` | GET | Config doctor results |
+| `/v1/logs` | GET | Log tail (`?limit=300&level=ALL`) |
 
-Base URL: `http://127.0.0.1:8797` (or your `--service-addr`)
+When a token is configured, send `X-SNISPF-Token: <token>` with every request.
 
-- `GET /v1/status`
-- `POST /v1/start`
-- `POST /v1/stop`
-- `GET /v1/health`
-- `GET /v1/validate`
-- `GET /v1/logs?limit=300&level=ALL`
+Recommended troubleshooting order: `/v1/status` → `/v1/validate` → `/v1/health` → `/v1/logs`
 
-If token is enabled, send header `X-SNISPF-Token: <token>`.
+Full request/response schema: [`docs/api-contract.md`](docs/api-contract.md)
 
-Recommended troubleshooting order:
+---
 
-1. `/v1/status`
-2. `/v1/validate`
-3. `/v1/health`
-4. `/v1/logs`
+## Multi-listener mode
 
-`/v1/health` includes `wrong_seq` counters from logs:
-
-- `confirmed`
-- `timeout`
-- `failed`
-- `not_registered`
-- `first_write_fail`
-
-Full request/response contract: `docs/api-contract.md`
-
-## OpenWrt Deployment (Practical Flow)
-
-Easiest option (recommended): use OpenWrt bundle archives.
-
-Build OpenWrt artifacts:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_openwrt_matrix.ps1
-```
-
-Copy one bundle for your architecture to router (example: x86_64):
-
-```bash
-scp ./release/openwrt/snispf_openwrt_x86_64_bundle.tar.gz root@192.168.1.1:/tmp/
-```
-
-Install from bundle on router:
-
-```sh
-ssh root@192.168.1.1
-cd /tmp
-tar -xzf snispf_openwrt_x86_64_bundle.tar.gz
-cd snispf_openwrt_bundle
-ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json
-```
-
-The bundle already contains:
-
-- `snispf` binary for selected architecture
-- `openwrt_snispf.sh` deployment/management script
-- `config.json` default config generated by core
-
-Manual option (advanced):
-
-Copy raw files to router:
-
-```bash
-scp ./release/openwrt/snispf_openwrt_armv7 root@192.168.1.1:/tmp/
-scp ./config.json root@192.168.1.1:/tmp/snispf_config.json
-scp ./release/openwrt/openwrt_snispf.sh root@192.168.1.1:/tmp/
-```
-
-Install and run on router (manual files):
-
-```sh
-ssh root@192.168.1.1
-chmod +x /tmp/openwrt_snispf.sh
-ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json
-```
-
-Installer behavior (default):
-
-- Schedules one delayed restart after install/start (default `20s`).
-- Asks to install watchdog in interactive shell (`--watchdog ask`).
-- In non-interactive mode, `ask` behaves like auto install.
-
-Watchdog defaults and tuning:
-
-- Default schedule is every `1` minute.
-- It restarts on down process, missing listen port, and degraded raw-injector patterns in logs.
-
-Force watchdog install or tune delayed restart:
-
-```sh
-ash /tmp/openwrt_snispf.sh watchdog-install
-ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /tmp/snispf_config.json --watchdog auto --post-restart-delay 20
-```
-
-Useful operations:
-
-```sh
-ash /tmp/openwrt_snispf.sh status
-ash /tmp/openwrt_snispf.sh logs --follow
-ash /tmp/openwrt_snispf.sh monitor --watch 30 --interval 2
-ash /tmp/openwrt_snispf.sh doctor
-```
-
-For strict `wrong_seq` on OpenWrt, use root or grant capability:
-
-```sh
-setcap cap_net_raw+ep /path/to/snispf_openwrt_armv7
-```
-
-## Build and Release Scripts
-
-Local build:
-
-```powershell
-go build -o snispf.exe ./cmd/snispf
-```
-
-Cross-build scripts:
-
-- Windows amd64: `powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_amd64.ps1`
-- Linux amd64 (PowerShell): `powershell -ExecutionPolicy Bypass -File .\scripts\build_linux_amd64.ps1`
-- Linux amd64 (bash): `bash ./scripts/build_linux_amd64.sh`
-- Full release matrix: `powershell -ExecutionPolicy Bypass -File .\scripts\build_release_matrix.ps1`
-- OpenWrt matrix (PowerShell): `powershell -ExecutionPolicy Bypass -File .\scripts\build_openwrt_matrix.ps1`
-- OpenWrt matrix (bash): `bash ./scripts/build_openwrt_matrix.sh`
-
-Verification scripts:
-
-- `powershell -ExecutionPolicy Bypass -File .\scripts\verify_release.ps1`
-- `bash ./scripts/verify_release.sh`
-
-Release outputs:
-
-- Core binaries: `release/snispf_windows_amd64.exe`, `release/snispf_linux_amd64`, `release/snispf_linux_arm64`
-- Bundled archives: `release/snispf_windows_amd64_bundle.zip`, `release/snispf_linux_amd64_bundle.tar.gz`, `release/snispf_linux_arm64_bundle.tar.gz`
-- Metadata: `release/checksums.txt`, `release/release_manifest.json`
-- OpenWrt: `release/openwrt/` (includes per-arch binaries, per-arch `*_bundle.tar.gz` archives, `openwrt_snispf.sh`, `openwrt_default_config.json`), `release/openwrt/checksums.txt`, `release/openwrt/release_manifest.json`
-
-Windows/Linux bundle note:
-
-- `config.json` inside Windows/Linux bundles is now generated by core at build time (`--generate-config`) to keep defaults consistent with current runtime behavior.
-
-OpenWrt matrix includes `armv7`, `armv6`, `mipsle_softfloat`, `mips_softfloat`, `arm64`, and `x86_64` binaries.
-
-OpenWrt runtime note:
-
-- If logs show `socket: too many open files`, your service file descriptor limit is too low.
-- Reinstall/upgrade with the latest `openwrt_snispf.sh` so the generated init script sets `procd` nofile limits, then restart the service.
-
-## Linux Service Deployment (Recommended)
-
-Linux bundles include a ready-to-use `systemd` service template and installer script:
-
-- `install_linux_service.sh`
-- `snispf.service`
-
-Install from a Linux bundle directory:
-
-```bash
-sudo bash ./install_linux_service.sh install --binary ./snispf_linux_amd64 --config ./config.json
-```
-
-Common operations:
-
-```bash
-sudo bash ./install_linux_service.sh status
-sudo bash ./install_linux_service.sh restart
-sudo bash ./install_linux_service.sh logs --lines 120
-```
-
-The default unit uses `Restart=always` and `LimitNOFILE=65535` to reduce file-descriptor related runtime failures under load.
-
-## GitHub Actions Release
-
-Workflow: `.github/workflows/release.yml`
-
-1. Trigger manually with `workflow_dispatch` for draft/test release builds.
-2. Push tag (for example `v1.2.3`) to build and publish assets.
-3. Workflow publishes both core and OpenWrt artifacts with checksums/manifest.
-
-## CLI Snapshot
-
-Common flags:
-
-- `--config`, `--generate-config`, `--config-doctor`, `--info`
-- `--listen`, `--connect`, `--sni`, `--method`
-- `--service`, `--service-addr`, `--service-token`
-- `--build-info`, `--version`
-
-Backward-compatible aliases:
-
-- `snispf run ...` -> direct core mode
-- `snispf service ...` -> service mode
-- `snispf doctor ...` -> config doctor
-- `snispf build-info` -> build metadata
-
-## Multi-Listener Example
+Run multiple local listeners in one process:
 
 ```json
 {
@@ -373,38 +212,165 @@ Backward-compatible aliases:
 }
 ```
 
-When `LISTENERS` is present, each listener runs independently in the same process.
+Each listener runs independently. When `LISTENERS` is present, per-listener values override any top-level defaults.
 
-## Verification Checklist
+---
 
-```powershell
+## Linux service deployment
+
+Linux bundles include a systemd template and installer:
+
+```bash
+sudo bash ./install_linux_service.sh install --binary ./snispf_linux_amd64 --config ./config.json
+sudo bash ./install_linux_service.sh status
+sudo bash ./install_linux_service.sh restart
+sudo bash ./install_linux_service.sh logs --lines 120
+```
+
+The default unit sets `Restart=always` and `LimitNOFILE=65535`.
+
+---
+
+## OpenWrt deployment
+
+Build and copy an architecture bundle to the router:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\build_openwrt_matrix.ps1
+scp ./release/openwrt/snispf_openwrt_x86_64_bundle.tar.gz root@192.168.1.1:/tmp/
+```
+
+Install on the router:
+
+```sh
+ssh root@192.168.1.1
+cd /tmp && tar -xzf snispf_openwrt_x86_64_bundle.tar.gz && cd snispf_openwrt_bundle
+ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json
+```
+
+The bundle includes the binary, `openwrt_snispf.sh`, and a generated default config.
+
+**Watchdog:** Installed interactively by default (every 1 minute). Restarts on down process, missing listen port, or degraded raw-injector log patterns. Force-install or tune:
+
+```sh
+ash ./openwrt_snispf.sh watchdog-install
+ash ./openwrt_snispf.sh install --binary ./snispf --config ./config.json --watchdog auto --post-restart-delay 20
+```
+
+Useful operations:
+
+```sh
+ash ./openwrt_snispf.sh status
+ash ./openwrt_snispf.sh logs --follow
+ash ./openwrt_snispf.sh monitor --watch 30 --interval 2
+ash ./openwrt_snispf.sh doctor
+```
+
+For `wrong_seq` on OpenWrt:
+
+```sh
+setcap cap_net_raw+ep /path/to/snispf
+```
+
+> **Note:** If logs show `socket: too many open files`, reinstall with the latest `openwrt_snispf.sh` to get the procd `nofile` limit fix.
+
+---
+
+## Build and release
+
+### Local
+
+```bash
+go build -o snispf.exe ./cmd/snispf
+```
+
+### Cross-build scripts
+
+| Target | Command |
+|---|---|
+| Windows amd64 | `powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_amd64.ps1` |
+| Linux amd64 (PowerShell) | `powershell -ExecutionPolicy Bypass -File .\scripts\build_linux_amd64.ps1` |
+| Linux amd64 (bash) | `bash ./scripts/build_linux_amd64.sh` |
+| Full release matrix | `powershell -ExecutionPolicy Bypass -File .\scripts\build_release_matrix.ps1` |
+| OpenWrt matrix (PowerShell) | `powershell -ExecutionPolicy Bypass -File .\scripts\build_openwrt_matrix.ps1` |
+| OpenWrt matrix (bash) | `bash ./scripts/build_openwrt_matrix.sh` |
+
+Verification:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\verify_release.ps1
+bash ./scripts/verify_release.sh
+```
+
+### Release outputs
+
+- Core binaries: `release/snispf_windows_amd64.exe`, `release/snispf_linux_amd64`, `release/snispf_linux_arm64`
+- Bundles: `release/snispf_*_bundle.{zip,tar.gz}`
+- OpenWrt: `release/openwrt/` — per-arch binaries, per-arch bundles, `openwrt_snispf.sh`, `openwrt_default_config.json`
+- Metadata: `release/checksums.txt`, `release/release_manifest.json`
+
+OpenWrt matrix architectures: `armv7`, `armv6`, `mipsle_softfloat`, `mips_softfloat`, `arm64`, `x86_64`
+
+### GitHub Actions
+
+Workflow: `.github/workflows/release.yml`
+
+- `workflow_dispatch` — draft/test builds
+- Push tag (e.g. `v1.2.3`) — full release with checksums and manifest
+
+---
+
+## CLI reference
+
+```
+--config <path>           Load config file
+--generate-config <path>  Write default config to path
+--config-doctor           Validate config and exit
+--info                    Show platform capability flags (no config required)
+--listen <host:port>      Override listen address
+--connect <ip:port>       Override upstream address
+--sni <hostname>          Override SNI
+--method <strategy>       Override bypass strategy
+--service                 Start in service API mode
+--service-addr <host:port>
+--service-token <token>
+--build-info / --version
+```
+
+Backward-compatible subcommand aliases: `snispf run`, `snispf service`, `snispf doctor`, `snispf build-info`
+
+---
+
+## Verification checklist
+
+```bash
 go test ./...
 go vet ./...
 go build -o snispf.exe ./cmd/snispf
 powershell -ExecutionPolicy Bypass -File .\scripts\build_linux_amd64.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build_release_matrix.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\verify_release.ps1
-```
-
-Windows service lifecycle integration:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\integration_service_lifecycle.ps1
 ```
 
-## Docs Map
+---
 
-- `docs/README.md`: documentation index and reading order.
-- `docs/beginner-guide.md`: first-time setup and troubleshooting path.
-- `docs/api-contract.md`: full service API contract.
-- `docs/internals.md`: detailed architecture and data path.
-- `docs/examples.md`: sanitized example profiles.
-- `docs/roadmap.md`: planned future direction.
+## Troubleshooting
 
-## Troubleshooting Checklist
+1. Run `--config-doctor` and fix all reported errors.
+2. Confirm your client is pointing to the local SNISPF listener address and port.
+3. Confirm upstream reachability via `/v1/health` or startup logs.
+4. For `wrong_seq`: verify platform privilege and single-endpoint constraint.
+5. Check `/v1/logs` for `timeout`, `failed`, and `not_registered` outcomes.
 
-1. Run config doctor and fix reported errors.
-2. Confirm client points to local SNISPF listener.
-3. Confirm upstream reachability (`/v1/health` or startup logs).
-4. For `wrong_seq`, verify platform privilege and single endpoint.
-5. Inspect `/v1/logs` for `timeout`, `failed`, and `not_registered` outcomes.
+---
+
+## Documentation
+
+| Doc | Audience |
+|---|---|
+| [`docs/beginner-guide.md`](docs/beginner-guide.md) | First-time setup and troubleshooting |
+| [`docs/api-contract.md`](docs/api-contract.md) | Service API schema and compatibility |
+| [`docs/internals.md`](docs/internals.md) | Architecture, code paths, contributing |
+| [`docs/examples.md`](docs/examples.md) | Annotated config profiles |
+| [`docs/roadmap.md`](docs/roadmap.md) | Planned direction and non-goals |

@@ -1,121 +1,206 @@
-# SNISPF Core Beginner Guide
+# Beginner guide
 
-This guide is for first-time users who want to run the core successfully with minimal guesswork.
+This guide gets you from zero to a working SNISPF connection. Follow the steps in order — don't skip ahead.
 
-## 1) What You Are Running
+---
 
-SNISPF Core is a local TCP forwarder that sits between your client app and your upstream endpoint.
+## What SNISPF does
 
-Your client connects to SNISPF locally:
+SNISPF sits between your client app and your upstream endpoint:
 
-- `127.0.0.1:40443` (example)
+```
+Your client  →  127.0.0.1:40443  →  SNISPF  →  188.114.98.0:443
+```
 
-SNISPF then forwards to your configured upstream endpoint:
+Your client connects locally to SNISPF. SNISPF connects to your upstream and applies a bypass strategy before forwarding traffic. Your client never needs to know about the bypass logic.
 
-- `CONNECT_IP:CONNECT_PORT`
+---
 
-## 2) Build
+## Step 1 — Build
 
-From the `core/` folder:
+From the repo root:
 
-```powershell
+```bash
 go build -o snispf.exe ./cmd/snispf
 ```
 
-## 3) Create a Starting Config
+---
 
-Generate a default config:
+## Step 2 — Create a config
 
-```powershell
+Generate a default config file:
+
+```bash
 .\snispf.exe --generate-config .\config.json
 ```
 
-Then run config doctor:
+Then validate it:
 
-```powershell
+```bash
 .\snispf.exe --config .\config.json --config-doctor
 ```
 
-If doctor reports errors, fix those first.
+Fix every error the doctor reports before moving on. Warnings are informational — errors will prevent startup.
 
-Config precedence tip:
+---
 
-- If you define `ENDPOINTS`, runtime connection values come from endpoint entries.
-- Top-level `CONNECT_IP`, `CONNECT_PORT`, and `FAKE_SNI` are backward-compatible defaults.
-- If top-level fields conflict with `ENDPOINTS[0]`, startup logs a warning that `ENDPOINTS[0]` is taking precedence.
+## Step 3 — Edit the config
 
-## 4) Choose a Safe First Method
-
-For first run, use `fragment`.
-
-Why:
-
-- Works without raw privileges.
-- Easiest to validate before trying strict raw methods.
-
-Set in `config.json`:
+Open `config.json` and fill in your upstream details. The recommended default strategy is `wrong_seq`:
 
 ```json
-"BYPASS_METHOD": "fragment"
+{
+  "LISTEN_HOST": "127.0.0.1",
+  "LISTEN_PORT": 40443,
+  "LOG_LEVEL": "info",
+  "CONNECT_IP": "your-upstream-ip",
+  "CONNECT_PORT": 443,
+  "FAKE_SNI": "your-upstream-hostname",
+  "BYPASS_METHOD": "wrong_seq",
+  "FRAGMENT_STRATEGY": "sni_split",
+  "FRAGMENT_DELAY": 0.05,
+  "USE_TTL_TRICK": false,
+  "FAKE_SNI_METHOD": "raw_inject",
+  "WRONG_SEQ_CONFIRM_TIMEOUT_MS": 2000,
+  "ENDPOINTS": [
+    {
+      "NAME": "primary",
+      "IP": "your-upstream-ip",
+      "PORT": 443,
+      "SNI": "your-upstream-hostname",
+      "ENABLED": true
+    }
+  ],
+  "LOAD_BALANCE": "failover",
+  "ENDPOINT_PROBE": true,
+  "AUTO_FAILOVER": false,
+  "FAILOVER_RETRIES": 0,
+  "PROBE_TIMEOUT_MS": 2500
+}
 ```
 
-## 5) Run the Core (Direct Mode)
+The only fields you need to change are `CONNECT_IP`, `FAKE_SNI`, and the matching values inside `ENDPOINTS[0]`. Everything else can stay as shown.
+
+| Field | What to put here |
+|---|---|
+| `CONNECT_IP` | IP address of your upstream endpoint |
+| `CONNECT_PORT` | Port of your upstream endpoint (usually 443) |
+| `FAKE_SNI` | Hostname associated with the upstream endpoint |
+| `ENDPOINTS[0].IP` / `.SNI` | Must match `CONNECT_IP` / `FAKE_SNI` |
+| `LISTEN_PORT` | Any unused local port (40443 is a safe default) |
+
+> **Config precedence note:** When `ENDPOINTS` is defined, runtime dial values come from there rather than the top-level `CONNECT_IP`/`CONNECT_PORT`/`FAKE_SNI` fields. The top-level fields exist for backward compatibility. A warning is logged at startup when `ENDPOINTS[0]` overrides them.
+
+**Can't use `wrong_seq`?** If your platform doesn't support raw packet injection, use `fragment` instead — change `BYPASS_METHOD` to `"fragment"` and remove the `WRONG_SEQ_CONFIRM_TIMEOUT_MS` field. See [Moving to other bypass strategies](#moving-to-other-bypass-strategies) for the full picture.
+
+---
+
+## Step 4 — Open a privileged terminal and run
+
+`wrong_seq` requires raw packet injection, which needs elevated privileges.
+
+**Windows — run as Administrator:**
+1. Right-click your terminal (PowerShell or CMD) and choose **Run as administrator**
+2. Make sure `WinDivert.dll` and `WinDivert64.sys` are in the same directory as `snispf.exe` — these ship with the Windows release bundle
+3. Run:
 
 ```powershell
 .\snispf.exe --config .\config.json
 ```
 
-If startup is successful, you should see listener logs.
+**Linux — grant capability or run as root:**
 
-## 6) Point Your Client to Local Core
+```bash
+# One-time capability grant (preferred over running as root)
+sudo setcap cap_net_raw+ep ./snispf
 
-In your client app, set:
+# Then run normally
+./snispf --config ./config.json
+```
 
-- Address: `127.0.0.1`
-- Port: `40443` (or your `LISTEN_PORT`)
+**Not sure if raw injection is available on your system?**
 
-Keep your client's protocol-specific settings as required by your own stack.
+```bash
+.\snispf.exe --info
+```
 
-## 7) Verify Connectivity
+If raw injection is unavailable, the output includes a `raw_injection_diagnostic` field explaining why. In that case, switch to `fragment` (see [Moving to other bypass strategies](#moving-to-other-bypass-strategies)).
 
-Checklist:
+You should see listener logs indicating SNISPF is running and waiting for connections.
 
-1. Core process is running.
-2. Client is pointing to local listen host/port.
-3. Config doctor has no errors.
-4. Upstream endpoint is reachable on TCP 443.
+---
 
-## 8) Move to Advanced Methods
+## Step 5 — Point your client
 
-### fake_sni / combined
+In your client application, set:
 
-- Can run with fallback behavior when raw injection is unavailable.
-- Good next step after `fragment` works.
+- **Address:** `127.0.0.1`
+- **Port:** `40443` (or whatever you set as `LISTEN_PORT`)
 
-### wrong_seq (strict)
+Leave all other client settings unchanged. SNISPF is transparent — your client behaves as if it's connecting directly to the upstream.
 
-Use this only when prerequisites are met:
+---
 
-- Raw injection support:
-  - Linux with root/CAP_NET_RAW.
-  - Windows with Administrator privileges and WinDivert available.
-- Exactly one enabled endpoint.
-- SNI <= 219 bytes.
-- Generated fake ClientHello <= 1460 bytes.
+## Step 6 — Verify it's working
 
-Optional tuning:
+Go through this checklist:
 
-- `WRONG_SEQ_CONFIRM_TIMEOUT_MS` (default `2000`)
+- [ ] SNISPF process is running with no error logs
+- [ ] Client is pointing to the local listener address and port
+- [ ] Config doctor reported no errors
+- [ ] Upstream endpoint is reachable on TCP port 443
 
-## 9) Service API Mode (Optional)
+If traffic isn't flowing, jump to the [Troubleshooting](#troubleshooting) section below.
 
-If you want desktop/automation control, run service mode:
+---
 
-```powershell
+## Moving to other bypass strategies
+
+`wrong_seq` is the recommended default. Only move to a different strategy if it doesn't work on your platform.
+
+### `combined` and `fake_sni`
+
+Both fall back gracefully when raw injection is unavailable and produce more aggressive bypass than `fragment` alone. Use these if `wrong_seq` prerequisites can't be met.
+
+```json
+"BYPASS_METHOD": "combined"
+```
+
+### `fragment`
+
+The simplest strategy — splits the TLS ClientHello without any raw injection. Works unprivileged everywhere. Use this for diagnosis or when no other strategy is viable.
+
+```json
+"BYPASS_METHOD": "fragment"
+```
+
+### `wrong_seq` prerequisites recap
+
+- **Exactly one enabled endpoint** in your config
+- **Privileged terminal:**
+  - Windows: Administrator + `WinDivert.dll` + `WinDivert64.sys` alongside the binary
+  - Linux: `root` or `CAP_NET_RAW` granted via `setcap`
+  - OpenWrt: `root` or `CAP_NET_RAW` + AF_PACKET support
+- **SNI hostname ≤ 219 characters**
+- **Generated fake ClientHello ≤ 1460 bytes** (validated by `--config-doctor`)
+
+---
+
+## Using service API mode (optional)
+
+If you want another process — a desktop app, launcher, or script — to control SNISPF, run it in service mode instead:
+
+```bash
 .\snispf.exe --service --service-addr 127.0.0.1:8797
 ```
 
-Useful API checks:
+With an auth token:
+
+```bash
+.\snispf.exe --service --service-addr 127.0.0.1:8797 --service-token your-token
+```
+
+Useful status checks (PowerShell):
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8797/v1/status
@@ -123,21 +208,68 @@ Invoke-RestMethod http://127.0.0.1:8797/v1/health
 Invoke-RestMethod http://127.0.0.1:8797/v1/validate
 ```
 
-## 10) Multi-Listener Mode
+Full API documentation: [`api-contract.md`](api-contract.md)
 
-You can run multiple local listeners in one process via `LISTENERS`.
+---
 
-Use this when you need separate local ports or different methods per route.
+## Running multiple listeners
 
-## 11) Common Mistakes
+You can run more than one local listener in a single SNISPF process using the `LISTENERS` array. Use this when you need different local ports, different upstream endpoints, or different bypass strategies running simultaneously.
 
-1. Running `wrong_seq` without Linux raw privileges.
-2. Enabling multiple endpoints with strict `wrong_seq`.
-3. Using unreachable upstream IP/SNI combinations.
-4. Forgetting to point the client to local SNISPF listener.
+See the root `README.md` for a full multi-listener example.
 
-## 12) Where to Read Next
+---
 
-- root `README.md` for full operational reference.
-- `docs/api-contract.md` for exact service API request/response schema.
-- `docs/internals.md` for deep internals and packet/state flow.
+## Troubleshooting
+
+### SNISPF starts but traffic doesn't flow
+
+1. Confirm your client is connecting to `127.0.0.1:LISTEN_PORT`, not directly to the upstream.
+2. Check startup logs for connection errors to the upstream IP.
+3. Run `/v1/health` (service mode) or look for probe errors in startup logs.
+
+### Config doctor reports errors
+
+Fix all errors before running. Common causes:
+- `CONNECT_IP` is a hostname instead of an IP address — resolve it first
+- `CONNECT_PORT` is out of range
+- `wrong_seq` selected but multiple endpoints configured
+
+### `wrong_seq` connections are failing
+
+Check `/v1/logs` or service logs for these outcome codes:
+
+| Code | Meaning |
+|---|---|
+| `confirmed` | Bypass succeeded |
+| `timeout` | Raw confirmation window expired — try increasing `WRONG_SEQ_CONFIRM_TIMEOUT_MS` |
+| `failed` | Upstream sent RST — endpoint may be blocking the technique |
+| `not_registered` | Flow wasn't registered before dial — may indicate a race condition |
+| `first_write_fail` | First payload write failed after confirmation |
+
+### Raw injection isn't working on Linux
+
+```bash
+# Check current capability
+.\snispf.exe --info
+
+# Grant capability without running as root
+sudo setcap cap_net_raw+ep ./snispf
+```
+
+---
+
+## Common mistakes
+
+- Running `wrong_seq` without the required platform privileges
+- Configuring multiple endpoints while using `wrong_seq`
+- Setting `CONNECT_IP` to a hostname (must be a resolved IP)
+- Forgetting to point the client to the local SNISPF address after config changes
+
+---
+
+## What to read next
+
+- **Root `README.md`** — full operational reference including multi-listener, OpenWrt, and release builds
+- **[`api-contract.md`](api-contract.md)** — exact service API request/response schema
+- **[`internals.md`](internals.md)** — architecture and code internals (for contributors and advanced debugging)

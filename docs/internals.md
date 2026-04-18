@@ -1,238 +1,233 @@
-# SNISPF Core Inner Workings
+# Internals
 
-This document explains how the Go core works internally, from process startup to packet-level bypass behavior.
+Architecture and implementation reference for contributors and advanced debugging. This document assumes familiarity with Go and TCP/IP fundamentals.
 
-## 1) High-level architecture
+For operational setup, see the root `README.md` and [`beginner-guide.md`](beginner-guide.md).
 
-The core has two execution models:
+---
 
-- Direct core mode: one process that accepts local TCP connections and forwards to upstream endpoints with bypass strategies.
-- Service API mode: a control process that exposes HTTP endpoints and starts/stops a child core worker process.
+## Execution models
 
-Main code areas:
+SNISPF has two top-level execution modes:
 
-- `cmd/snispf/main.go`: bootstrap, CLI flags, config loading, strategy selection, and runtime startup.
-- `cmd/snispf/service_api.go`: localhost control API (`/v1/status`, `/v1/start`, `/v1/stop`, `/v1/health`, `/v1/validate`, `/v1/logs`).
-- `internal/forwarder/server.go`: listener and per-connection forwarding loop.
-- `internal/bypass/*`: strategy implementations.
-- `internal/rawinjector/*`: raw packet monitor/injector implementation and platform stubs.
-- `internal/tlsclienthello/*`: ClientHello parsing/building/fragmentation helpers.
-- `internal/utils/*`: config schema, normalization, endpoint probing, and platform capability checks.
+**Direct mode** — a single process accepts local TCP connections and forwards them to upstream endpoints with bypass strategies applied.
 
-## 2) Startup and configuration pipeline
+**Service API mode** — a controller process exposes HTTP endpoints and manages a child worker process that runs the direct-mode core. The two processes communicate only through process lifecycle signals and log files.
 
-In direct mode, startup flow in `main.go` is:
+---
 
-1. Parse CLI flags and normalize aliases.
-2. Load config JSON (or defaults if generating config).
-3. Apply CLI overrides for listen/connect/sni/method/fragment options.
-4. Validate port ranges.
+## Code map
+
+| Path | Responsibility |
+|---|---|
+| `cmd/snispf/main.go` | Bootstrap, CLI parsing, config loading, strategy wiring, runtime startup |
+| `cmd/snispf/service_api.go` | HTTP control API (`/v1/*`) and worker process lifecycle |
+| `internal/forwarder/server.go` | TCP listener and per-connection forwarding loop |
+| `internal/bypass/` | Strategy implementations (`fragment`, `fake_sni`, `combined`, `wrong_seq`) |
+| `internal/rawinjector/` | Raw packet monitor and injector (Linux, Windows, and stub) |
+| `internal/tlsclienthello/` | ClientHello parsing, building, and fragmentation |
+| `internal/utils/` | Config schema, normalization, endpoint probing, capability checks |
+
+---
+
+## Startup pipeline (direct mode)
+
+`main.go` startup in order:
+
+1. Parse CLI flags and normalize aliases
+2. Load config JSON (or generate defaults)
+3. Apply CLI flag overrides (`--listen`, `--connect`, `--sni`, `--method`)
+4. Validate port ranges
 5. Normalize config (`utils.NormalizeConfig`):
-   - Fill defaults.
-   - Apply inherited defaults to each `LISTENERS[]` entry when present.
-   - Materialize endpoint list when missing.
-   - Resolve hostnames to IPs.
-   - Ensure `WRONG_SEQ_CONFIRM_TIMEOUT_MS` default (2000 ms).
-6. Emit startup precedence warnings when top-level upstream fields conflict with `ENDPOINTS[0]`.
-7. Filter to enabled/valid endpoints (`utils.EnabledEndpoints`).
-8. Optional endpoint health probing (`utils.ProbeHealthyEndpoints`).
-9. Build optional raw injector (single endpoint only, method-dependent, platform-dependent).
-10. Build bypass strategy implementation.
-11. Start forwarder server with cancellation context.
+   - Fill missing defaults
+   - Apply top-level defaults to each `LISTENERS[]` entry
+   - Materialize endpoint list when absent
+   - Resolve hostnames to IPs
+   - Ensure `WRONG_SEQ_CONFIRM_TIMEOUT_MS` default (2000 ms)
+6. Log precedence warnings when `ENDPOINTS[0]` overrides top-level fields
+7. Filter to enabled and valid endpoints (`utils.EnabledEndpoints`)
+8. Optional endpoint health probing (`utils.ProbeHealthyEndpoints`)
+9. Build raw injector (single endpoint, strategy-dependent, platform-dependent)
+10. Build bypass strategy implementation
+11. Start forwarder server with cancellation context
 
-If `LISTENERS` is configured, the core starts one forwarder per listener inside the same process.
+When `LISTENERS` is configured, steps 9–11 repeat once per listener inside the same process.
 
-Key behavior note: `wrong_seq` is strict. Startup enforces:
+`wrong_seq` enforces two additional startup constraints before proceeding: exactly one enabled endpoint and a working raw injector.
 
-- Exactly one enabled endpoint.
-- Raw injector availability on Linux with needed privileges.
+---
 
-## 3) Forwarding data plane (per connection)
+## Per-connection forwarding loop
 
-Connection lifecycle in `internal/forwarder/server.go`:
+`internal/forwarder/server.go`:
 
-1. Accept inbound TCP client.
-2. Read first payload (expected TLS ClientHello in common usage).
-3. Parse incoming ClientHello for observability/logging.
-4. Select upstream endpoint based on load-balancer base index and failover attempts.
-5. Dial upstream TCP connection.
-6. Apply bypass strategy to first payload.
-7. If strategy fails:
-   - `wrong_seq`: terminate connection (strict semantics).
-   - other methods: fallback to writing first payload directly.
-8. Start bidirectional relay (`io.Copy` in both directions).
+1. Accept inbound TCP connection
+2. Read first payload (expected to be a TLS ClientHello)
+3. Parse incoming ClientHello for logging and observability
+4. Select upstream endpoint (load-balancer index + failover offset)
+5. Reserve a local source port, register it with the raw injector
+6. Dial upstream using that specific source port
+7. Apply bypass strategy to the first payload
+8. On strategy failure:
+   - `wrong_seq` — terminate connection (strict: no fallback)
+   - all other strategies — write first payload directly as fallback
+9. Start bidirectional relay (`io.Copy` in both directions)
 
-### Why pre-connect raw registration was added
+**Why source port reservation?** For raw-assisted strategies, the forwarder must register the local source port with the injector *before* the TCP handshake occurs. This ensures the injector sees the SYN/ACK for the tracked flow before the confirmation window begins.
 
-For raw-assisted modes, the forwarder reserves a local source port, registers that port with the injector, then dials upstream using that specific source port. This lets the raw injector see SYN/ACK handshake packets for the same tracked flow before confirmation wait begins.
+---
 
-## 4) Bypass strategy internals
+## Bypass strategy implementations
 
-### fragment
+All strategies implement the `internal/bypass/Strategy` interface. The forwarder calls the strategy with the first payload and the established upstream connection.
 
-File: `internal/bypass/fragment.go`
+### `fragment` (`internal/bypass/fragment.go`)
 
-- Pure stream-level strategy.
-- Fragments first TLS payload (`tlsclienthello.FragmentClientHello`) based on configured split strategy.
-- Writes fragments with configurable delay.
-- No raw socket requirement.
+Pure stream-level strategy — no raw socket required.
 
-### fake_sni
+- Fragments the TLS ClientHello using `tlsclienthello.FragmentClientHello` according to the configured split strategy
+- Writes fragments with configurable inter-fragment delay
+- Works unprivileged on all platforms
 
-File: `internal/bypass/fake_sni.go`
+### `fake_sni` (`internal/bypass/fake_sni.go`)
 
-Two tracks:
+Two code paths depending on raw injector availability:
 
-- Raw-injector active:
-  - Wait for confirmation window.
-  - Send real first payload regardless of confirmation outcome (soft fallback behavior).
-- Non-raw path:
-  - `ttl_trick`: send fake hello with low TTL, then send real payload.
-  - Other fake methods map to safe fragmentation fallback to avoid stream corruption.
+**With raw injector:** Waits for confirmation window, then sends the real first payload regardless of outcome (soft fallback — never terminates on confirmation failure).
 
-### combined
+**Without raw injector:**
+- `ttl_trick` method: sends a fake ClientHello with a low TTL, then sends the real payload
+- All other fake methods: fall back to fragmentation to avoid stream corruption
 
-File: `internal/bypass/combined.go`
+### `combined` (`internal/bypass/combined.go`)
 
-- Mixes fake prelude behavior and fragmentation.
-- If raw injector exists: waits for confirmation but continues even on timeout.
-- Else if TTL trick enabled: attempts fake hello with low TTL.
-- Then always fragments and sends real payload.
+Combines fake prelude behavior with fragmentation:
 
-### wrong_seq (strict)
+1. If raw injector present: wait for confirmation (continues even on timeout)
+2. Else if TTL trick enabled: attempt fake ClientHello with low TTL
+3. Always: fragment and send real payload
 
-File: `internal/bypass/wrong_seq.go`
+### `wrong_seq` (`internal/bypass/wrong_seq.go`)
 
-- Implements strict behavior modeled after legacy strict flows.
-- Requires raw injector.
-- Waits for detailed confirmation status up to `WRONG_SEQ_CONFIRM_TIMEOUT_MS`.
-- On non-confirmed statuses (`failed`, `timeout`, `not_registered`): returns failure and connection is not relayed.
-- On success: writes first payload and proceeds to relay.
+Strict mode — mirrors the behavior of legacy strict bypass flows.
 
-## 5) Raw injector internals (Linux)
+- Requires raw injector (startup enforces this)
+- Waits for detailed confirmation status up to `WRONG_SEQ_CONFIRM_TIMEOUT_MS`
+- Returns failure and aborts the connection for any non-confirmed outcome: `failed`, `timeout`, `not_registered`
+- On `confirmed`: writes first payload and hands off to relay
 
-File: `internal/rawinjector/rawinjector_linux.go`
+---
 
-### Core mechanism
+## Raw injector — Linux (`internal/rawinjector/rawinjector_linux.go`)
 
-- Opens AF_PACKET raw socket and binds to interface matching selected local IP.
-- Tracks per-source-port state (`portState`) for monitored connection flows.
-- Observes outbound/inbound TCP packets and manages a small state machine.
-- Filters packet tracking by both configured upstream IP and upstream TCP port.
+### Mechanism
 
-### State machine summary
+Opens an `AF_PACKET` raw socket bound to the network interface matching the configured local IP. Tracks per-source-port connection state in a `portState` map. Filters packet tracking by both upstream IP and upstream TCP port.
+
+### Per-connection state machine
 
 For each registered local source port:
 
-1. Capture outbound SYN and remember client ISN (`synSeq`, `synSeen`).
-2. Capture outbound third-handshake ACK (`seq == synSeq+1`, ACK-only).
-3. Build fake frame from observed template:
-   - Append fake ClientHello payload.
-   - Set PSH.
-   - Set fake sequence to `synSeq + 1 - len(fake_payload)`.
-   - Recompute IP/TCP checksums.
-4. Inject frame through AF_PACKET.
-5. Observe inbound ACK-only packets and mark confirmed when ACK equals `synSeq+1`.
-6. Observe inbound RST and mark failed.
+| Step | Event | Action |
+|---|---|---|
+| 1 | Outbound SYN | Record client ISN as `synSeq`, set `synSeen` |
+| 2 | Outbound ACK (`seq == synSeq+1`, ACK-only) | Capture packet as injection template |
+| 3 | — | Build fake frame: append fake ClientHello payload, set PSH flag, set `seq = synSeq + 1 - len(fake_payload)`, recompute IP/TCP checksums |
+| 4 | — | Inject frame via `AF_PACKET` |
+| 5 | Inbound ACK-only (`ACK == synSeq+1`) | Mark state `confirmed` |
+| 6 | Inbound RST | Mark state `failed` |
 
 ### Confirmation API
 
-- `WaitForConfirmation`: boolean wrapper.
-- `WaitForConfirmationDetailed`: status enum (`confirmed`, `failed`, `timeout`, `not_registered`).
+- `WaitForConfirmation(port)` — returns bool
+- `WaitForConfirmationDetailed(port)` — returns status enum: `confirmed`, `failed`, `timeout`, `not_registered`
 
-## 5.1) Raw injector internals (Windows)
+---
 
-File: `internal/rawinjector/rawinjector_windows.go`
+## Raw injector — Windows (`internal/rawinjector/rawinjector_windows.go`)
 
-- Uses WinDivert sniff + send handles with staged fallback filter chains.
-- Tracks per-source-port state similarly to Linux flow registration.
-- Injects crafted packets via WinDivert send path and waits for confirmation statuses.
-- Emits diagnostics to help identify WinDivert runtime/load errors.
+Uses WinDivert sniff and send handles with staged fallback filter chains. Per-source-port state tracking mirrors the Linux implementation. Injects crafted packets via the WinDivert send path. Emits diagnostics to help identify WinDivert load or runtime errors.
 
-Other non-Linux/non-Windows builds use `rawinjector_stub.go` with unavailable/no-op behavior.
+Non-Linux/non-Windows platforms use `rawinjector_stub.go`, which returns `unavailable` for all operations.
 
-## 6) Service mode internals
+---
 
-File: `cmd/snispf/service_api.go`
+## Service API internals (`cmd/snispf/service_api.go`)
 
-Service mode runs as a controller process and manages a worker child process.
+The service controller manages a child worker process launched as:
 
-Endpoints:
+```
+snispf --run-core --config <path>
+```
 
-- `/v1/status`: worker running state, PID, start time, paths, platform.
-- `/v1/start`: validates config and launches child worker (`--run-core --config ...`).
-- `/v1/stop`: stops worker process.
-- `/v1/health`: endpoint TCP probe plus `wrong_seq` counters parsed from log lines.
-- `/v1/validate`: returns doctor issues/warnings.
-- `/v1/logs`: returns filtered/tail logs.
+### Endpoints
+
+| Endpoint | Implementation |
+|---|---|
+| `/v1/status` | Returns worker process state, PID, start time, platform, and config/log paths |
+| `/v1/start` | Runs config validation, then spawns child worker process |
+| `/v1/stop` | Sends stop signal to worker; force-kills after grace period |
+| `/v1/health` | TCP probes each enabled endpoint; parses `wrong_seq` outcome counters from worker log lines |
+| `/v1/validate` | Runs config doctor; returns issues and warnings |
+| `/v1/logs` | Reads and filters tail of service log file |
 
 ### Parent lifecycle guard
 
-When `--service-parent-pid` and optional start timestamp are passed, service mode periodically verifies parent identity to avoid PID reuse errors and self-shuts down when parent exits/changes.
+When started with `--service-parent-pid` (and optionally a start timestamp), the service polls the named PID and shuts itself down when the parent exits or the PID is reused by a different process. This prevents orphaned service processes when a launcher crashes.
 
-## 7) Endpoint management and failover model
+### Why `wrong_seq` counters are log-derived
 
-Config and endpoint handling in `internal/utils/endpoints.go`:
+The service controller and the core worker are separate processes with no shared memory. Parsing counter values from worker log lines avoids an IPC channel and keeps the two processes decoupled.
 
-- Endpoints can be explicitly configured with per-endpoint SNI.
-- `ENDPOINT_PROBE` can remove dead endpoints at startup.
-- Load balancing modes:
-  - `round_robin`
-  - `random`
-  - `failover`
-- Default load balancing mode is `round_robin`.
-- `AUTO_FAILOVER` is disabled by default and enables retry attempts on endpoint dial failures.
-- Runtime dial failover uses base index + retry attempts.
+---
 
-Important interaction: strict `wrong_seq` currently expects one endpoint to preserve deterministic raw tracking semantics.
+## Endpoint management (`internal/utils/endpoints.go`)
 
-## 8) Observability model
+- Endpoints can be defined explicitly with per-endpoint SNI overrides
+- `ENDPOINT_PROBE` removes unreachable endpoints at startup
+- Load balancing modes: `round_robin` (default), `random`, `failover`
+- `AUTO_FAILOVER` (disabled by default) enables retry on dial failure
+- Runtime failover uses base index + retry attempt offset
 
-Current observability channels:
+`wrong_seq` requires exactly one endpoint to preserve deterministic raw tracking — the injector state machine is keyed by local source port, which is only meaningful against a single known upstream IP:port pair.
 
-- Standard logs for strategy and runtime decisions.
-- `/v1/logs` for external clients.
-- `/v1/health` for endpoint probes and `wrong_seq` outcome counters.
+---
 
-`wrong_seq` counters are log-derived in service mode because service and worker are separate processes; this avoids shared-memory coupling.
+## Observability
 
-## 9) Platform behavior and privilege assumptions
+| Channel | What it surfaces |
+|---|---|
+| Structured logs | Strategy decisions, connection outcomes, raw injector events |
+| `/v1/logs` | Log tail with level filtering for external clients |
+| `/v1/health` | Per-endpoint TCP probe latency + `wrong_seq` outcome counters |
 
-- Fragmentation path works unprivileged on all supported platforms.
-- Raw injection path requires Linux AF_PACKET raw socket capability.
-- Capability hints are surfaced via `--info` and config doctor warnings.
+---
 
-## 10) Why this design
+## Extending the core
 
-The core favors:
+### Adding a bypass strategy
 
-- A small data plane (`forwarder + strategy`) with isolated strategy implementations.
-- Explicit strict mode (`wrong_seq`) versus soft-fallback modes (`fake_sni`, `combined`).
-- A stable control-plane API in service mode for desktop and automation clients.
-- Pragmatic observability through logs and API snapshots without heavyweight runtime dependencies.
-- Multi-listener consolidation so one process can host multiple local entry points without extra supervisors.
+1. Implement `internal/bypass/Strategy`
+2. Wire the strategy name in `buildStrategy` in `cmd/snispf/main.go`
+3. Add config doctor validation for any new required fields
+4. Decide strict vs. soft-fallback behavior for the forwarder failure branch
+5. Update `docs/examples.md` with a sample config profile
 
-## 11) Extending the core safely
+### Extending raw behavior
 
-To add a new bypass strategy:
+- Keep the state machine deterministic and keyed by local source port
+- Preserve clear, named status values — avoid boolean returns where an enum is more informative
+- Never write application payload before the desired packet-level confirmation in strict modes
 
-1. Implement `internal/bypass/Strategy` interface.
-2. Wire selection in `buildStrategy` in `cmd/snispf/main.go`.
-3. Add config doctor validation and CLI help text.
-4. Decide strict-vs-fallback behavior in forwarder failure branch.
-5. Update docs and sample configs.
+---
 
-To extend raw behavior:
+## Config validation constraints
 
-1. Keep state machine deterministic and flow-keyed by local source port.
-2. Preserve clear success/failure statuses.
-3. Avoid writing application payload before desired packet-level confirmation in strict modes.
+Config doctor and startup enforce these packet-crafting limits:
 
-## 12) Guardrails
+| Constraint | Limit | Reason |
+|---|---|---|
+| SNI length | ≤ 219 bytes | Avoids oversized fake ClientHello fields |
+| Fake ClientHello size | ≤ 1460 bytes | Stays within standard Ethernet MTU |
 
-Config doctor and startup checks enforce key packet-crafting constraints:
-
-- SNI length must be <= 219 bytes.
-- Generated fake ClientHello size must be <= 1460 bytes.
-
-These limits reduce malformed packets and MTU-related issues in raw injection paths.
+Violating either constraint produces a config doctor error that blocks startup.

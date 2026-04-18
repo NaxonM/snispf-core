@@ -1,21 +1,25 @@
-# SNISPF Core Service API Contract
+# Service API contract
 
 Base URL is configured with `--service-addr` (default `127.0.0.1:8797`).
 
-## Versioning and compatibility policy
+---
 
-- Current API version: `v1`.
-- Responses include `api_version` where applicable.
-- Within `v1`, additive fields may be introduced without breaking compatibility.
-- Removal/rename of existing fields requires a new major API version.
-- Clients should ignore unknown JSON fields.
+## Versioning
 
-## Auth
+- Current version: `v1`
+- Responses include `api_version` where applicable
+- Within `v1`: new fields may be added without a breaking change
+- Removal or rename of existing fields requires a new major version
+- Clients must ignore unknown JSON fields
 
-When started with `--service-token`, all endpoints require one of:
+---
+
+## Authentication
+
+When SNISPF is started with `--service-token`, all endpoints require the token in one of:
 
 - Header: `X-SNISPF-Token: <token>`
-- Query: `?token=<token>`
+- Query parameter: `?token=<token>`
 
 Unauthorized response:
 
@@ -23,13 +27,13 @@ Unauthorized response:
 { "error": "unauthorized" }
 ```
 
+---
+
 ## Endpoints
 
-### GET /v1/status
+### `GET /v1/status`
 
-Returns service and core process status.
-
-Example response:
+Returns the service and worker process state.
 
 ```json
 {
@@ -45,13 +49,15 @@ Example response:
 }
 ```
 
-### POST /v1/start
+---
 
-Validates current config and starts core worker.
+### `POST /v1/start`
 
-Success response: same schema as `/v1/status`.
+Validates the current config and starts the core worker.
 
-Error examples:
+**Success:** Same schema as `/v1/status`.
+
+**Errors:**
 
 ```json
 { "error": "core already running" }
@@ -61,17 +67,19 @@ Error examples:
 { "error": "config has 1 issue(s); call /v1/validate" }
 ```
 
-### POST /v1/stop
+---
 
-Stops core worker if running.
+### `POST /v1/stop`
 
-Success response: same schema as `/v1/status`.
+Stops the core worker if running.
 
-### GET /v1/validate
+**Response:** Same schema as `/v1/status`.
 
-Runs config doctor checks.
+---
 
-Example response:
+### `GET /v1/validate`
+
+Runs config doctor checks and returns all issues and warnings.
 
 ```json
 {
@@ -83,11 +91,13 @@ Example response:
 }
 ```
 
-### GET /v1/health
+`issues` block startup. `warnings` are informational.
 
-Runs endpoint probe checks on enabled endpoints.
+---
 
-Example response:
+### `GET /v1/health`
+
+TCP-probes each enabled endpoint and returns `wrong_seq` outcome counters parsed from recent logs.
 
 ```json
 {
@@ -115,18 +125,31 @@ Example response:
 }
 ```
 
-### GET /v1/logs
+`wrong_seq` counter definitions:
 
-Query params:
+| Counter | Meaning |
+|---|---|
+| `confirmed` | Bypass succeeded — upstream acknowledged the fake sequence |
+| `timeout` | Confirmation window expired before upstream ACK |
+| `failed` | Upstream sent RST |
+| `not_registered` | Flow was not registered before dial |
+| `first_write_fail` | First payload write failed after confirmation |
+| `source_lines` | Number of log lines scanned to produce the counters |
 
-- `limit` integer, default `200`, min `1`, max `2000`
-- `level` one of `ALL`, `ERROR`, `WARN`, `INFO`, `DEBUG`
+---
 
-Example request:
+### `GET /v1/logs`
 
-`/v1/logs?limit=300&level=ALL`
+Returns a filtered tail of the service log.
 
-Example response:
+**Query parameters:**
+
+| Parameter | Type | Default | Range |
+|---|---|---|---|
+| `limit` | integer | `200` | 1–2000 |
+| `level` | string | `ALL` | `ALL`, `ERROR`, `WARN`, `INFO`, `DEBUG` |
+
+Example: `/v1/logs?limit=300&level=WARN`
 
 ```json
 {
@@ -134,18 +157,26 @@ Example response:
   "logs": "...",
   "returned_lines": 300,
   "limit": 300,
-  "level": ""
+  "level": "WARN"
 }
 ```
 
-Note: `level=ALL` is normalized to an empty filter string in the response.
+`level=ALL` is normalized to an empty filter string in the response `level` field.
 
-## Method restrictions
+---
 
-- `GET`: `/v1/status`, `/v1/validate`, `/v1/health`, `/v1/logs`
-- `POST`: `/v1/start`, `/v1/stop`
+## Method constraints
 
-Invalid method returns:
+| Endpoint | Allowed methods |
+|---|---|
+| `/v1/status` | `GET` |
+| `/v1/start` | `POST` |
+| `/v1/stop` | `POST` |
+| `/v1/validate` | `GET` |
+| `/v1/health` | `GET` |
+| `/v1/logs` | `GET` |
+
+Wrong method response:
 
 ```json
 { "error": "method not allowed" }
