@@ -33,11 +33,12 @@ In direct mode, startup flow in `main.go` is:
    - Materialize endpoint list when missing.
    - Resolve hostnames to IPs.
    - Ensure `WRONG_SEQ_CONFIRM_TIMEOUT_MS` default (2000 ms).
-6. Filter to enabled/valid endpoints (`utils.EnabledEndpoints`).
-7. Optional endpoint health probing (`utils.ProbeHealthyEndpoints`).
-8. Build optional raw injector (single endpoint only, method-dependent, platform-dependent).
-9. Build bypass strategy implementation.
-10. Start forwarder server with cancellation context.
+6. Emit startup precedence warnings when top-level upstream fields conflict with `ENDPOINTS[0]`.
+7. Filter to enabled/valid endpoints (`utils.EnabledEndpoints`).
+8. Optional endpoint health probing (`utils.ProbeHealthyEndpoints`).
+9. Build optional raw injector (single endpoint only, method-dependent, platform-dependent).
+10. Build bypass strategy implementation.
+11. Start forwarder server with cancellation context.
 
 If `LISTENERS` is configured, the core starts one forwarder per listener inside the same process.
 
@@ -179,6 +180,8 @@ Config and endpoint handling in `internal/utils/endpoints.go`:
   - `round_robin`
   - `random`
   - `failover`
+- Default load balancing mode is `round_robin`.
+- `AUTO_FAILOVER` is disabled by default and enables retry attempts on endpoint dial failures.
 - Runtime dial failover uses base index + retry attempts.
 
 Important interaction: strict `wrong_seq` currently expects one endpoint to preserve deterministic raw tracking semantics.

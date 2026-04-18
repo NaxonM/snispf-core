@@ -32,6 +32,8 @@ Run this to inspect runtime capability flags:
 .\snispf.exe --info
 ```
 
+`--info` is config-independent and does not require `--config` or `config.json`.
+
 If raw injection is unavailable, `--info` can print `raw_injection_diagnostic=...` with the reason.
 
 ## Quickstart (4 Steps)
@@ -74,6 +76,12 @@ Field mapping:
 | `CONNECT_IP:CONNECT_PORT` | Upstream destination SNISPF dials |
 | `FAKE_SNI` | SNI used by fake/combined logic and endpoint defaults |
 | `BYPASS_METHOD` | Strategy (`fragment`, `fake_sni`, `combined`, `wrong_seq`) |
+
+Config precedence note:
+
+- If `ENDPOINTS` exists, runtime endpoint dial values come from `ENDPOINTS`.
+- Top-level `CONNECT_IP`, `CONNECT_PORT`, and `FAKE_SNI` remain backward-compatible defaults.
+- If top-level values conflict with `ENDPOINTS[0]`, startup logs a warning showing that `ENDPOINTS[0]` overrides top-level fields.
 
 ### Step 4) Run and Point Client
 
@@ -216,7 +224,7 @@ Useful operations:
 ash /tmp/openwrt_snispf.sh status
 ash /tmp/openwrt_snispf.sh logs --follow
 ash /tmp/openwrt_snispf.sh monitor --watch 30 --interval 2
-/tmp/openwrt_snispf.sh doctor
+ash /tmp/openwrt_snispf.sh doctor
 ```
 
 For strict `wrong_seq` on OpenWrt, use root or grant capability:

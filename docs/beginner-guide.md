@@ -38,6 +38,12 @@ Then run config doctor:
 
 If doctor reports errors, fix those first.
 
+Config precedence tip:
+
+- If you define `ENDPOINTS`, runtime connection values come from endpoint entries.
+- Top-level `CONNECT_IP`, `CONNECT_PORT`, and `FAKE_SNI` are backward-compatible defaults.
+- If top-level fields conflict with `ENDPOINTS[0]`, startup logs a warning that `ENDPOINTS[0]` is taking precedence.
+
 ## 4) Choose a Safe First Method
 
 For first run, use `fragment`.

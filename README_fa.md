@@ -28,6 +28,8 @@ SNISPF مسیر ارتباط را این طور مدیریت می کند:
 .\snispf.exe --info
 ```
 
+`--info` مستقل از config است و به `--config` یا `config.json` نیاز ندارد.
+
 اگر raw injection در دسترس نباشد، خروجی `--info` می تواند مقدار `raw_injection_diagnostic=...` را نشان دهد.
 
 ## شروع سریع (۴ مرحله)
@@ -70,6 +72,12 @@ go build -o snispf.exe ./cmd/snispf
 | `CONNECT_IP:CONNECT_PORT` | مقصد upstream که SNISPF به آن وصل می شود |
 | `FAKE_SNI` | دامنه SNI برای روش های fake/combined |
 | `BYPASS_METHOD` | روش bypass (`fragment`، `fake_sni`، `combined`، `wrong_seq`) |
+
+نکته تقدم تنظیمات:
+
+- اگر `ENDPOINTS` تعریف شده باشد، مقادیر واقعی اتصال از `ENDPOINTS` خوانده می شود.
+- فیلدهای top-level یعنی `CONNECT_IP`، `CONNECT_PORT` و `FAKE_SNI` برای سازگاری با نسخه های قبلی حفظ شده اند.
+- اگر این فیلدها با `ENDPOINTS[0]` اختلاف داشته باشند، هنگام startup یک warning لاگ می شود که override شدن توسط `ENDPOINTS[0]` را مشخص می کند.
 
 ### مرحله ۴) اجرا و اتصال کلاینت
 
@@ -210,7 +218,7 @@ ash /tmp/openwrt_snispf.sh install --binary /tmp/snispf_openwrt_armv7 --config /
 ash /tmp/openwrt_snispf.sh status
 ash /tmp/openwrt_snispf.sh logs --follow
 ash /tmp/openwrt_snispf.sh monitor --watch 30 --interval 2
-/tmp/openwrt_snispf.sh doctor
+ash /tmp/openwrt_snispf.sh doctor
 ```
 
 برای `wrong_seq` در OpenWrt می توانید capability بدهید:
