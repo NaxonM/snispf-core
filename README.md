@@ -291,34 +291,6 @@ setcap cap_net_raw+ep /path/to/snispf
 
 ---
 
-## Termux deployment (Android)
-
-SNISPF can be run inside Termux on Android ARM64 devices. A helper script is provided at `scripts/termux.sh`.
-
-### Installation
-
-For root users (recommended for `wrong_seq` strategy):
-```bash
-curl -s https://raw.githubusercontent.com/NaxonM/snispf-core/refs/heads/dev/scripts/termux.sh -o termux.sh && chmod +x termux.sh && bash termux.sh --install --root
-```
-
-For non-root users:
-```bash
-curl -s https://raw.githubusercontent.com/NaxonM/snispf-core/refs/heads/dev/scripts/termux.sh -o termux.sh && chmod +x termux.sh && bash termux.sh --install
-```
-
-### Usage
-
-Once installed, the manager creates a standalone `sni` shortcut command:
-```bash
-sni run          # Start proxy (foreground)
-sni stop         # Stop proxy
-sni status       # Check status
-sni update       # Update binary
-```
-
----
-
 ## Build and release
 
 ### Local
